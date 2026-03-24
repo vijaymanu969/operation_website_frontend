@@ -1,14 +1,5 @@
-import 'api_client.dart';
+// Stubbed AppFlowy API — no backend calls for now
 
 class AppFlowyApi {
-  final ApiClient _client;
-  static const _baseUrl = 'http://localhost/appflowy';
-
-  AppFlowyApi({required ApiClient client}) : _client = client;
-
-  // TODO: Add AppFlowy-Cloud endpoint methods
-  Future<dynamic> getWorkspaces() async {
-    final response = await _client.dio.get('$_baseUrl/api/workspace');
-    return response.data;
-  }
+  // Will be wired to AppFlowy-Cloud endpoints when backend is ready
 }

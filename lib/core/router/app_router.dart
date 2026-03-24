@@ -13,6 +13,7 @@ import '../../features/tasks/tasks_screen.dart';
 import '../../features/attendance/attendance_screen.dart';
 import '../../features/chat/chat_screen.dart';
 import '../../features/analytics/analytics_screen.dart';
+import '../../shared/widgets/app_shell.dart';
 
 class AppRouter {
   final AuthBloc authBloc;
@@ -42,41 +43,46 @@ class AppRouter {
         path: '/login',
         builder: (context, state) => const LoginScreen(),
       ),
-      GoRoute(
-        path: '/dashboard/ceo',
-        builder: (context, state) => const CeoDashboard(),
-      ),
-      GoRoute(
-        path: '/dashboard/tech',
-        builder: (context, state) => const TechDirectorDashboard(),
-      ),
-      GoRoute(
-        path: '/dashboard/ops',
-        builder: (context, state) => const OpsDirectorDashboard(),
-      ),
-      GoRoute(
-        path: '/dashboard/sales',
-        builder: (context, state) => const SalesDirectorDashboard(),
-      ),
-      GoRoute(
-        path: '/dashboard/staff',
-        builder: (context, state) => const StaffDashboard(),
-      ),
-      GoRoute(
-        path: '/tasks',
-        builder: (context, state) => const TasksScreen(),
-      ),
-      GoRoute(
-        path: '/attendance',
-        builder: (context, state) => const AttendanceScreen(),
-      ),
-      GoRoute(
-        path: '/chat',
-        builder: (context, state) => const ChatScreen(),
-      ),
-      GoRoute(
-        path: '/analytics',
-        builder: (context, state) => const AnalyticsScreen(),
+      ShellRoute(
+        builder: (context, state, child) => AppShell(child: child),
+        routes: [
+          GoRoute(
+            path: '/dashboard/ceo',
+            builder: (context, state) => const CeoDashboard(),
+          ),
+          GoRoute(
+            path: '/dashboard/tech',
+            builder: (context, state) => const TechDirectorDashboard(),
+          ),
+          GoRoute(
+            path: '/dashboard/ops',
+            builder: (context, state) => const OpsDirectorDashboard(),
+          ),
+          GoRoute(
+            path: '/dashboard/sales',
+            builder: (context, state) => const SalesDirectorDashboard(),
+          ),
+          GoRoute(
+            path: '/dashboard/staff',
+            builder: (context, state) => const StaffDashboard(),
+          ),
+          GoRoute(
+            path: '/tasks',
+            builder: (context, state) => const TasksScreen(),
+          ),
+          GoRoute(
+            path: '/attendance',
+            builder: (context, state) => const AttendanceScreen(),
+          ),
+          GoRoute(
+            path: '/chat',
+            builder: (context, state) => const ChatScreen(),
+          ),
+          GoRoute(
+            path: '/analytics',
+            builder: (context, state) => const AnalyticsScreen(),
+          ),
+        ],
       ),
     ],
   );

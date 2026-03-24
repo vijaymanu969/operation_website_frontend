@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../core/auth/auth_bloc.dart';
+import '../../core/auth/user_role.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -13,6 +14,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
+  UserRole _selectedRole = UserRole.ceo;
 
   static const _primaryColor = Color(0xFF1A1A2E);
   static const _accentColor = Color(0xFFE94560);
@@ -30,6 +32,7 @@ class _LoginScreenState extends State<LoginScreen> {
             AuthLoginRequested(
               email: _emailController.text.trim(),
               password: _passwordController.text,
+              role: _selectedRole,
             ),
           );
     }
@@ -123,6 +126,30 @@ class _LoginScreenState extends State<LoginScreen> {
                       return null;
                     },
                     onFieldSubmitted: (_) => _onSubmit(),
+                  ),
+                  const SizedBox(height: 20),
+                  DropdownButtonFormField<UserRole>(
+                    value: _selectedRole,
+                    decoration: InputDecoration(
+                      labelText: 'Login as (dev mode)',
+                      prefixIcon: const Icon(Icons.person_outline),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: _accentColor, width: 2),
+                      ),
+                    ),
+                    items: UserRole.values.map((role) {
+                      return DropdownMenuItem(
+                        value: role,
+                        child: Text(role.displayName),
+                      );
+                    }).toList(),
+                    onChanged: (role) {
+                      if (role != null) setState(() => _selectedRole = role);
+                    },
                   ),
                   const SizedBox(height: 32),
                   BlocConsumer<AuthBloc, AuthState>(
