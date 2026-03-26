@@ -274,73 +274,148 @@ class _TasksScreenState extends State<TasksScreen> {
   }
 
   void _showAddTaskDialog() {
-    final titleController = TextEditingController();
-    final descController  = TextEditingController();
+    final titleController    = TextEditingController();
+    final descController     = TextEditingController();
+    final assigneeController = TextEditingController();
     String selectedGroup  = 'todo';
+    String selectedType   = 'Task';
+    DateTime? selectedDate;
+
+    const types = ['Task', 'Feature', 'Bug', 'Design', 'Docs', 'DevOps', 'Setup'];
+    const border = OutlineInputBorder();
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('New Task'),
-        content: SizedBox(
-          width: 400,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: titleController,
-                decoration: const InputDecoration(
-                    labelText: 'Title', border: OutlineInputBorder()),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('New Task', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          content: SizedBox(
+            width: 440,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Title
+                  TextField(
+                    controller: titleController,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                        labelText: 'Title', border: border),
+                  ),
+                  const SizedBox(height: 12),
+                  // Description
+                  TextField(
+                    controller: descController,
+                    decoration: InputDecoration(
+                        labelText: 'Description', border: border),
+                    maxLines: 3,
+                  ),
+                  const SizedBox(height: 12),
+                  // Person
+                  TextField(
+                    controller: assigneeController,
+                    decoration: InputDecoration(
+                        labelText: 'Person', border: border),
+                  ),
+                  const SizedBox(height: 12),
+                  // Due date
+                  InkWell(
+                    borderRadius: BorderRadius.circular(4),
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: ctx,
+                        initialDate: selectedDate ?? DateTime.now(),
+                        firstDate: DateTime(2024),
+                        lastDate: DateTime(2030),
+                      );
+                      if (picked != null) {
+                        setDialogState(() => selectedDate = picked);
+                      }
+                    },
+                    child: InputDecorator(
+                      decoration: InputDecoration(
+                          labelText: 'Due Date', border: border),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            selectedDate == null
+                                ? 'Pick a date'
+                                : '${selectedDate!.month.toString().padLeft(2, '0')}/'
+                                    '${selectedDate!.day.toString().padLeft(2, '0')}/'
+                                    '${selectedDate!.year}',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: selectedDate == null
+                                  ? Colors.grey[500]
+                                  : Colors.grey[900],
+                            ),
+                          ),
+                          Icon(Icons.calendar_today_outlined,
+                              size: 16, color: Colors.grey[500]),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Type
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedType,
+                    decoration: InputDecoration(
+                        labelText: 'Type', border: border),
+                    items: types
+                        .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) setDialogState(() => selectedType = v);
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  // Column / Status
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedGroup,
+                    decoration: InputDecoration(
+                        labelText: 'Status', border: border),
+                    items: const [
+                      DropdownMenuItem(value: 'todo',        child: Text('To Do')),
+                      DropdownMenuItem(value: 'in_progress', child: Text('In Progress')),
+                      DropdownMenuItem(value: 'done',        child: Text('Done')),
+                    ],
+                    onChanged: (v) {
+                      if (v != null) setDialogState(() => selectedGroup = v);
+                    },
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: descController,
-                decoration: const InputDecoration(
-                    labelText: 'Description', border: OutlineInputBorder()),
-                maxLines: 3,
-              ),
-              const SizedBox(height: 12),
-              StatefulBuilder(
-                builder: (context, setDialogState) =>
-                    DropdownButtonFormField<String>(
-                  initialValue: selectedGroup,
-                  decoration: const InputDecoration(
-                      labelText: 'Column', border: OutlineInputBorder()),
-                  items: const [
-                    DropdownMenuItem(value: 'todo',        child: Text('To Do')),
-                    DropdownMenuItem(value: 'in_progress', child: Text('In Progress')),
-                    DropdownMenuItem(value: 'done',        child: Text('Done')),
-                  ],
-                  onChanged: (v) {
-                    if (v != null) setDialogState(() => selectedGroup = v);
-                  },
-                ),
-              ),
-            ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                if (titleController.text.trim().isNotEmpty) {
+                  _boardController
+                      .getGroupController(selectedGroup)
+                      ?.add(TaskItem(
+                        title: titleController.text.trim(),
+                        description: descController.text.trim(),
+                        assignee: assigneeController.text.trim(),
+                        type: selectedType,
+                        date: selectedDate,
+                        priorityColor: _groupColor(selectedGroup),
+                      ));
+                  Navigator.pop(ctx);
+                }
+              },
+              style: FilledButton.styleFrom(backgroundColor: _kAccent),
+              child: const Text('Add'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              if (titleController.text.trim().isNotEmpty) {
-                _boardController
-                    .getGroupController(selectedGroup)
-                    ?.add(TaskItem(
-                      title: titleController.text.trim(),
-                      description: descController.text.trim(),
-                      priorityColor: Colors.blue,
-                    ));
-                Navigator.pop(ctx);
-              }
-            },
-            style: FilledButton.styleFrom(backgroundColor: _kAccent),
-            child: const Text('Add'),
-          ),
-        ],
       ),
     );
   }
