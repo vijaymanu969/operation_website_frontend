@@ -794,7 +794,7 @@ class _AnalysisPanel extends StatelessWidget {
             physics: const NeverScrollableScrollPhysics(),
             crossAxisSpacing: 8,
             mainAxisSpacing: 8,
-            childAspectRatio: 1.6,
+            childAspectRatio: 2.4,
             children: summaries.map((s) => _StatCard(s)).toList(),
           ),
           const SizedBox(height: 20),
@@ -828,22 +828,25 @@ class _StatCard extends StatelessWidget {
     final mm = ((s.totalHours - hh) * 60).round();
 
     return Container(
-      padding: const EdgeInsets.all(10),
+      // Less vertical padding — card content is compact, no need for tall spacing
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: _kBg,
+        color: const Color.fromARGB(255, 0, 6, 18),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: _kBorder),
+        border: Border.all(color: const Color.fromARGB(255, 0, 94, 255)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
+          // Slightly smaller label — it's secondary info
           Text(s.name,
               style: TextStyle(
-                  fontSize: 10,
+                  fontSize: 22,
                   fontWeight: FontWeight.w700,
-                  color: Colors.grey[600],
+                  color: const Color.fromARGB(255, 235, 243, 247),
                   letterSpacing: 0.5)),
+          // 22→16: the big number was forcing the card to be tall
           RichText(
             text: TextSpan(
               style: const TextStyle(color: _kPrimary),
@@ -854,26 +857,19 @@ class _StatCard extends StatelessWidget {
                         fontSize: 22, fontWeight: FontWeight.bold)),
                 TextSpan(
                     text: 'h ${mm.toString().padLeft(2, '0')}m',
-                    style: const TextStyle(fontSize: 12)),
+                    style: const TextStyle(fontSize: 11)),
               ],
             ),
           ),
+          // Merged avg/day into the same chip row — removes a whole row of height
           Row(
             children: [
-              _Chip('${s.daysPresent} days', Colors.green),
+              _Chip('${s.daysPresent}d', Colors.green),
               const SizedBox(width: 4),
-              _Chip('${s.leaves} leave', _kAccent),
+              _Chip('${s.leaves}L', _kAccent),
+              const SizedBox(width: 4),
+              _Chip('avg ${_fmtHours(s.avgPerDay)}', Colors.blueGrey),
             ],
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: _kBorder),
-            ),
-            child: Text('Avg/day  ${_fmtHours(s.avgPerDay)}',
-                style: const TextStyle(fontSize: 10, color: _kPrimary)),
           ),
         ],
       ),
