@@ -29,62 +29,83 @@ class CelumeSidebar extends StatelessWidget {
 
   Widget _buildDrawerContent(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // ── Header ────────────────────────────────────────────────────────────
         const SizedBox(height: 40),
-        Text(
-          'CELUME OPS',
-          style: TextStyle(
-            color: _accentColor,
-            fontSize: 22,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 2,
+        Center(
+          child: Text(
+            'CELUME OPS',
+            style: TextStyle(
+              color: _accentColor,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 2,
+            ),
           ),
         ),
         const SizedBox(height: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-          decoration: BoxDecoration(
-            color: _accentColor.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(
-            role.displayName,
-            style: const TextStyle(color: Colors.white70, fontSize: 13),
+        Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            decoration: BoxDecoration(
+              color: _accentColor.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              role.displayName,
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+            ),
           ),
         ),
         const SizedBox(height: 32),
-        _NavItem(
-          icon: Icons.dashboard,
-          label: 'Dashboard',
-          onTap: () => context.go(role.routePath),
+
+        // ── Nav items (scrollable if height is tight) ──────────────────────
+        Expanded(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _NavItem(
+                  icon:  Icons.dashboard,
+                  label: 'Dashboard',
+                  onTap: () => context.go(role.routePath),
+                ),
+                _NavItem(
+                  icon:  Icons.task_alt,
+                  label: 'Tasks',
+                  onTap: () => context.go('/tasks'),
+                ),
+                _NavItem(
+                  icon:  Icons.access_time,
+                  label: 'Attendance',
+                  onTap: () => context.go('/attendance'),
+                ),
+                _NavItem(
+                  icon:  Icons.chat_bubble_outline,
+                  label: 'Chat',
+                  onTap: () => context.go('/chat'),
+                ),
+                _NavItem(
+                  icon:  Icons.bar_chart,
+                  label: 'Analytics',
+                  onTap: () => context.go('/analytics'),
+                ),
+                _NavItem(
+                  icon:  Icons.people_outline_rounded,
+                  label: 'Clients',
+                  onTap: () => context.go('/clients'),
+                ),
+              ],
+            ),
+          ),
         ),
+
+        // ── Logout — always pinned at bottom ──────────────────────────────
         _NavItem(
-          icon: Icons.task_alt,
-          label: 'Tasks',
-          onTap: () => context.go('/tasks'),
-        ),
-        _NavItem(
-          icon: Icons.access_time,
-          label: 'Attendance',
-          onTap: () => context.go('/attendance'),
-        ),
-        _NavItem(
-          icon: Icons.chat_bubble_outline,
-          label: 'Chat',
-          onTap: () => context.go('/chat'),
-        ),
-        _NavItem(
-          icon: Icons.bar_chart,
-          label: 'Analytics',
-          onTap: () => context.go('/analytics'),
-        ),
-        const Spacer(),
-        _NavItem(
-          icon: Icons.logout,
+          icon:  Icons.logout,
           label: 'Logout',
-          onTap: () {
-            context.read<AuthBloc>().add(AuthLogoutRequested());
-          },
+          onTap: () => context.read<AuthBloc>().add(AuthLogoutRequested()),
         ),
         const SizedBox(height: 24),
       ],

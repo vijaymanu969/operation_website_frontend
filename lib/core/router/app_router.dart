@@ -13,6 +13,7 @@ import '../../features/tasks/tasks_screen.dart';
 import '../../features/attendance/attendance_screen.dart';
 import '../../features/chat/chat_screen.dart';
 import '../../features/analytics/analytics_screen.dart';
+import '../../features/clients/clients_screen.dart';
 import '../../shared/widgets/app_shell.dart';
 
 class AppRouter {
@@ -81,6 +82,10 @@ class AppRouter {
           GoRoute(
             path: '/analytics',
             builder: (context, state) => const AnalyticsScreen(),
+          ),
+          GoRoute(
+            path: '/clients',
+            builder: (context, state) => const ClientsScreen(),
           ),
         ],
       ),
