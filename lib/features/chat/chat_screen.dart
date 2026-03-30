@@ -39,6 +39,7 @@ class _Message {
   final bool    sent;          // true = me (right), false = them (left)
   final String  time;
   final String? imageCaption;  // non-null → render image placeholder + caption
+  final _ChatTask? task;       // non-null → render task review card
 
   const _Message({
     this.dateLabel,
@@ -46,6 +47,33 @@ class _Message {
     this.sent        = false,
     this.time        = '',
     this.imageCaption,
+    this.task,
+  });
+}
+
+// ── Task review models ────────────────────────────────────────────────────────
+
+enum _TaskReviewStatus { pending, completed, rejected }
+
+class _ChatTask {
+  final String title;
+  final String description;
+  final String assignee;
+  final String priority;  // High / Medium / Low
+  final String type;
+  final String date;       // display string
+  final int    commentCount;
+  _TaskReviewStatus reviewStatus;
+
+  _ChatTask({
+    required this.title,
+    required this.description,
+    required this.assignee,
+    required this.priority,
+    required this.type,
+    required this.date,
+    this.commentCount   = 0,
+    this.reviewStatus   = _TaskReviewStatus.pending,
   });
 }
 
@@ -90,41 +118,90 @@ const _kContacts = <_Contact>[
   ),
 ];
 
-// Messages shown for the active contact (Lindsey Curtis by default).
-const _kMessages = <_Message>[
-  _Message(dateLabel: 'Yesterday'),
-  _Message(
-    text: 'I want to make an appointment tomorrow from 2:00 to 5:00pm?',
-    sent: false, time: '30 mins ago',
-  ),
-  _Message(
-    text: "If don't like something, I'll stay away from it.",
-    sent: true,  time: '2 hours ago',
-  ),
-  _Message(
-    text: 'I want more detailed information.',
-    sent: false, time: '2 hours ago',
-  ),
-  _Message(
-    text: 'They got there early, and got really good seats.',
-    sent: true,  time: '2 hours ago',
-  ),
-  // Image message — imageCaption non-null triggers the image bubble.
-  _Message(imageCaption: 'Please preview the image', sent: false, time: '2 hours ago'),
-  _Message(dateLabel: 'Today'),
-  _Message(
-    text: 'Good morning! Did you get a chance to look at the designs?',
-    sent: false, time: '9:00 AM',
-  ),
-  _Message(
-    text: 'Yes, they look great! Just a few minor tweaks needed.',
-    sent: true,  time: '9:15 AM',
-  ),
-  _Message(
-    text: 'Can you send me the updated file when ready?',
-    sent: false, time: '9:20 AM',
-  ),
-];
+// Messages per contact id — mutable so task status can change in-place.
+final _kMessagesByContact = <String, List<_Message>>{
+  '2': [
+    const _Message(dateLabel: 'Yesterday'),
+    const _Message(
+      text: 'I want to make an appointment tomorrow from 2:00 to 5:00pm?',
+      sent: false, time: '30 mins ago',
+    ),
+    const _Message(
+      text: "If don't like something, I'll stay away from it.",
+      sent: true,  time: '2 hours ago',
+    ),
+    const _Message(
+      text: 'I want more detailed information.',
+      sent: false, time: '2 hours ago',
+    ),
+    const _Message(
+      text: 'They got there early, and got really good seats.',
+      sent: true,  time: '2 hours ago',
+    ),
+    const _Message(imageCaption: 'Please preview the image', sent: false, time: '2 hours ago'),
+    const _Message(dateLabel: 'Today'),
+    const _Message(
+      text: 'Good morning! Did you get a chance to look at the designs?',
+      sent: false, time: '9:00 AM',
+    ),
+    const _Message(
+      text: 'Yes, they look great! Just a few minor tweaks needed.',
+      sent: true,  time: '9:15 AM',
+    ),
+    const _Message(
+      text: 'Can you send me the updated file when ready?',
+      sent: false, time: '9:20 AM',
+    ),
+  ],
+  '1': [
+    const _Message(dateLabel: 'Today'),
+    const _Message(
+      text: "Hey, I've finished the auth flow task. Marking it as done now.",
+      sent: false, time: '10:30 AM',
+    ),
+    // Task review card — sent by the system when intern marks "Done"
+    _Message(
+      sent: false, time: '10:30 AM',
+      task: _ChatTask(
+        title:       'Build auth flow',
+        description: 'Implement GoTrue login, logout and session refresh',
+        assignee:    'Bob',
+        priority:    'High',
+        type:        'Feature',
+        date:        'Mar 30',
+        commentCount: 2,
+      ),
+    ),
+    const _Message(
+      text: 'Nice work! Let me review it quickly.',
+      sent: true, time: '10:45 AM',
+    ),
+  ],
+  '3': [
+    const _Message(dateLabel: 'Today'),
+    const _Message(
+      text: 'API docs are ready for review.',
+      sent: false, time: '11:00 AM',
+    ),
+    _Message(
+      sent: false, time: '11:00 AM',
+      task: _ChatTask(
+        title:       'Write API documentation',
+        description: 'Document all REST endpoints with examples and error codes',
+        assignee:    'Charlie',
+        priority:    'Low',
+        type:        'Docs',
+        date:        'Apr 2',
+        commentCount: 0,
+        reviewStatus: _TaskReviewStatus.completed,
+      ),
+    ),
+    const _Message(
+      text: 'Looks solid, approved!',
+      sent: true, time: '11:20 AM',
+    ),
+  ],
+};
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
@@ -376,13 +453,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // Scrollable message list
   Widget _buildMessages(_Contact contact) {
+    final messages = _kMessagesByContact[contact.id] ?? [];
     return ListView.builder(
       controller: _scrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      itemCount: _kMessages.length,
+      itemCount: messages.length,
       itemBuilder: (_, i) {
-        final msg = _kMessages[i];
+        final msg = messages[i];
         if (msg.dateLabel != null)     return _buildDateSeparator(msg.dateLabel!);
+        if (msg.task != null)          return _buildTaskReviewCard(msg, contact);
         if (msg.imageCaption != null)  return _buildImageMessage(msg, contact);
         return _buildTextBubble(msg, contact);
       },
@@ -534,6 +613,42 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ── Task review card inside chat ────────────────────────────────────────────
+
+  Widget _buildTaskReviewCard(_Message msg, _Contact contact) {
+    final task = msg.task!;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          CircleAvatar(
+            radius: 14,
+            backgroundColor: contact.avatarColor,
+            child: Text(contact.initials,
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+          ),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _ChatTaskCard(
+                task:     task,
+                onReject:   () => setState(() => task.reviewStatus = _TaskReviewStatus.rejected),
+                onComplete: () => setState(() => task.reviewStatus = _TaskReviewStatus.completed),
+              ),
+              const SizedBox(height: 4),
+              Text('${contact.name}, ${msg.time}',
+                  style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Bottom input bar ────────────────────────────────────────────────────────
 
   Widget _buildInputBar() {
@@ -652,4 +767,250 @@ class _StatusDot extends StatelessWidget {
       ),
     );
   }
+}
+
+// ─── Task review card (reuses visual style of _TaskCard from tasks_screen) ───
+
+const _kGreen  = Color(0xFF10B981);
+const _kHigh   = Color(0xFFEF4444);
+const _kMedium = Color(0xFFF59E0B);
+const _kLow    = Color(0xFF3B82F6);
+const _kMuted  = Color(0xFF9CA3AF);
+
+class _ChatTaskCard extends StatelessWidget {
+  final _ChatTask   task;
+  final VoidCallback onReject;
+  final VoidCallback onComplete;
+
+  const _ChatTaskCard({
+    required this.task,
+    required this.onReject,
+    required this.onComplete,
+  });
+
+  Color get _priorityColor => switch (task.priority) {
+    'High'   => _kHigh,
+    'Medium' => _kMedium,
+    'Low'    => _kLow,
+    _        => _kMuted,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final isPending   = task.reviewStatus == _TaskReviewStatus.pending;
+    final isCompleted = task.reviewStatus == _TaskReviewStatus.completed;
+    final isRejected  = task.reviewStatus == _TaskReviewStatus.rejected;
+
+    final borderColor = isCompleted
+        ? _kGreen
+        : isRejected
+            ? _kHigh
+            : _kBorder;
+
+    return Container(
+      width: 320,
+      decoration: BoxDecoration(
+        color:        Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border:       Border.all(color: borderColor, width: isCompleted || isRejected ? 1.5 : 1),
+        boxShadow: const [
+          BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header strip ────────────────────────────────────────────────
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: isCompleted
+                  ? const Color(0xFFF0FDF4)
+                  : isRejected
+                      ? const Color(0xFFFFF5F5)
+                      : _kBg,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(7)),
+            ),
+            child: Row(children: [
+              Icon(
+                isCompleted
+                    ? Icons.check_circle_rounded
+                    : isRejected
+                        ? Icons.cancel_rounded
+                        : Icons.assignment_outlined,
+                size:  15,
+                color: isCompleted ? _kGreen : isRejected ? _kHigh : _kPrimary,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                isCompleted
+                    ? 'Task Completed'
+                    : isRejected
+                        ? 'Task Rejected'
+                        : 'Task Review',
+                style: TextStyle(
+                  fontSize:   12,
+                  fontWeight: FontWeight.w600,
+                  color: isCompleted ? _kGreen : isRejected ? _kHigh : _kPrimary,
+                ),
+              ),
+            ]),
+          ),
+
+          const Divider(height: 1, color: _kBorder),
+
+          // ── Card body (mirrors _TaskCard layout) ────────────────────────
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Priority + Type badges
+                Row(children: [
+                  _Badge(task.priority, _priorityColor),
+                  const SizedBox(width: 6),
+                  _Badge(task.type, const Color(0xFF6366F1)),
+                  const Spacer(),
+                  if (isCompleted)
+                    const Icon(Icons.check_circle_rounded, size: 14, color: _kGreen),
+                ]),
+                const SizedBox(height: 8),
+
+                // Title
+                Text(task.title,
+                    style: TextStyle(
+                      fontSize:      13,
+                      fontWeight:    FontWeight.w600,
+                      color:         isCompleted ? _kMuted : _kPrimary,
+                      decoration:    isCompleted ? TextDecoration.lineThrough : null,
+                      decorationColor: _kMuted,
+                    )),
+                if (task.description.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(task.description,
+                      style: const TextStyle(fontSize: 11, color: _kMuted, height: 1.4),
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                ],
+
+                const SizedBox(height: 10),
+                const Divider(height: 1, color: _kBorder),
+                const SizedBox(height: 10),
+
+                // Assignee + meta
+                Row(children: [
+                  if (task.assignee.isNotEmpty) ...[
+                    CircleAvatar(
+                      radius:          10,
+                      backgroundColor: Color(0xFF6366F1 + (task.assignee.hashCode & 0x00FFFFFF)),
+                      child: Text(task.assignee[0].toUpperCase(),
+                          style: const TextStyle(fontSize: 9, color: Colors.white,
+                              fontWeight: FontWeight.w600)),
+                    ),
+                    const SizedBox(width: 5),
+                    Text(task.assignee,
+                        style: const TextStyle(fontSize: 11, color: _kMuted)),
+                  ],
+                  const Spacer(),
+                  if (task.commentCount > 0) ...[
+                    Icon(Icons.chat_bubble_outline_rounded, size: 11, color: _kMuted),
+                    const SizedBox(width: 3),
+                    Text('${task.commentCount}',
+                        style: const TextStyle(fontSize: 10, color: _kMuted)),
+                    const SizedBox(width: 8),
+                  ],
+                  Icon(Icons.calendar_today_outlined, size: 11, color: _kMuted),
+                  const SizedBox(width: 3),
+                  Text(task.date,
+                      style: const TextStyle(fontSize: 10, color: _kMuted)),
+                ]),
+              ],
+            ),
+          ),
+
+          // ── Action buttons (only when pending) ──────────────────────────
+          if (isPending) ...[
+            const Divider(height: 1, color: _kBorder),
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: Row(children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: onReject,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _kHigh,
+                      side:    const BorderSide(color: _kHigh),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape:   RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    ),
+                    child: const Text('Reject', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: onComplete,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _kGreen,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape:   RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    ),
+                    child: const Text('Mark Complete', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  ),
+                ),
+              ]),
+            ),
+          ],
+
+          // ── Status pill (after action taken) ────────────────────────────
+          if (!isPending)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color:        isCompleted ? const Color(0xFFF0FDF4) : const Color(0xFFFFF5F5),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(
+                    isCompleted ? Icons.check_circle_rounded : Icons.cancel_rounded,
+                    size:  12,
+                    color: isCompleted ? _kGreen : _kHigh,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    isCompleted ? 'Completed' : 'Rejected',
+                    style: TextStyle(
+                      fontSize:   11,
+                      fontWeight: FontWeight.w600,
+                      color:      isCompleted ? _kGreen : _kHigh,
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Reusable badge (priority / type) ─────────────────────────────────────────
+
+class _Badge extends StatelessWidget {
+  final String label;
+  final Color  color;
+  const _Badge(this.label, this.color);
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color:        color.withValues(alpha: 0.1),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Text(label,
+        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
+  );
 }

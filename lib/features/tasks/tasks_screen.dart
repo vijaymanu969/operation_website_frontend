@@ -939,29 +939,6 @@ class _PanelRow extends StatelessWidget {
   }
 }
 
-class _PanelSection extends StatelessWidget {
-  final IconData icon;
-  final String   label;
-  final Widget   child;
-  const _PanelSection({required this.icon, required this.label, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(children: [
-          Icon(icon, size: 14, color: _kMuted),
-          const SizedBox(width: 8),
-          Text(label, style: const TextStyle(fontSize: 12, color: _kMuted)),
-        ]),
-        const SizedBox(height: 6),
-        Padding(padding: const EdgeInsets.only(left: 22), child: child),
-      ],
-    );
-  }
-}
-
 // ─── Reusable: Comment bubble ─────────────────────────────────────────────────
 
 class _CommentBubble extends StatelessWidget {
@@ -1003,10 +980,12 @@ class _TaskDetailPanel extends StatefulWidget {
 }
 
 class _TaskDetailPanelState extends State<_TaskDetailPanel> {
-  final _commentCtrl  = TextEditingController();
-  final _dateRowKey   = GlobalKey();
+  late final _titleCtrl   = TextEditingController(text: widget.item.title);
+  late final _descCtrl    = TextEditingController(text: widget.item.description);
+  final _commentCtrl      = TextEditingController();
+  final _dateRowKey       = GlobalKey();
   OverlayEntry? _dateOverlay;
-  bool _endDateEnabled = false;
+  bool _endDateEnabled    = false;
 
   final List<SelectOption> _typeOpts = [
     SelectOption(id: '1', name: 'prompt',         color: SelectOptionColor.purple),
@@ -1019,6 +998,8 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   @override
   void dispose() {
     _closeDateOverlay();
+    _titleCtrl.dispose();
+    _descCtrl.dispose();
     _commentCtrl.dispose();
     super.dispose();
   }
@@ -1068,32 +1049,19 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   Widget build(BuildContext context) {
     final item = widget.item;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize:        MainAxisSize.min,
+      crossAxisAlignment:  CrossAxisAlignment.start,
       children: [
-        // ── Header ──────────────────────────────────────────────────────────
-        Container(
-          height:  52,
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          decoration: const BoxDecoration(
-            border: Border(bottom: BorderSide(color: _kBorder)),
-          ),
-          child: Row(children: [
-            _PriorityBadge(item.priority),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(item.title,
-                  style: const TextStyle(
-                      fontSize:   14,
-                      fontWeight: FontWeight.w600,
-                      color:      _kPrimary),
-                  overflow: TextOverflow.ellipsis),
-            ),
-            // Close button
-            InkWell(
+        // ── Close button row ──────────────────────────────────────────────
+        Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 12, right: 12),
+            child: InkWell(
               onTap:        widget.onClose,
               borderRadius: BorderRadius.circular(6),
               child: Container(
-                width:  26, height: 26,
+                width:  28, height: 28,
                 decoration: BoxDecoration(
                   color:        _kBg,
                   borderRadius: BorderRadius.circular(6),
@@ -1102,16 +1070,64 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                 child: Icon(Icons.close, size: 14, color: _kMuted),
               ),
             ),
-          ]),
+          ),
         ),
+
         // ── Body ────────────────────────────────────────────────────────────
         Flexible(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Done toggle
+                // ── Title (editable, header size) ──────────────────────────
+                TextField(
+                  controller: _titleCtrl,
+                  style:      const TextStyle(
+                    fontSize:   20,
+                    fontWeight: FontWeight.w700,
+                    color:      _kPrimary,
+                  ),
+                  decoration: const InputDecoration(
+                    hintText:  'Untitled',
+                    hintStyle: TextStyle(fontSize: 20, fontWeight: FontWeight.w700,
+                        color: Color(0xFFD1D5DB)),
+                    border:    InputBorder.none,
+                    isDense:   true,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                  onChanged: (v) {
+                    item.title = v;
+                    widget.onChanged();
+                  },
+                ),
+                const SizedBox(height: 4),
+
+                // ── Description (editable, normal size) ────────────────────
+                TextField(
+                  controller: _descCtrl,
+                  maxLines:   null,
+                  style:      const TextStyle(
+                    fontSize: 13,
+                    height:   1.5,
+                    color:    Color(0xFF4B5563),
+                  ),
+                  decoration: const InputDecoration(
+                    hintText:  'Add a description…',
+                    hintStyle: TextStyle(fontSize: 13, color: Color(0xFFD1D5DB)),
+                    border:    InputBorder.none,
+                    isDense:   true,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                  onChanged: (v) {
+                    item.description = v;
+                    widget.onChanged();
+                  },
+                ),
+
+                const Divider(height: 28, color: _kBorder),
+
+                // ── Done checkbox ──────────────────────────────────────────
                 _PanelRow(
                   icon:  Icons.check_circle_outline_rounded,
                   label: 'Done',
@@ -1130,7 +1146,8 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   ),
                 ),
                 const SizedBox(height: 14),
-                // Priority
+
+                // ── Priority ───────────────────────────────────────────────
                 _PanelRow(
                   icon:  Icons.flag_outlined,
                   label: 'Priority',
@@ -1160,7 +1177,57 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   ),
                 ),
                 const SizedBox(height: 14),
-                // Type
+
+                // ── Due date ───────────────────────────────────────────────
+                KeyedSubtree(
+                  key: _dateRowKey,
+                  child: _PanelRow(
+                    icon:  Icons.calendar_today_outlined,
+                    label: 'Due date',
+                    child: GestureDetector(
+                      onTap: _openDateOverlay,
+                      child: Row(children: [
+                        Text(
+                          item.date == null
+                              ? 'Set date'
+                              : (_endDateEnabled && item.endDate != null)
+                                  ? '${_fmtDate(item.date!)}  →  ${_fmtDate(item.endDate!)}'
+                                  : _fmtDate(item.date!),
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: item.date == null ? _kMuted : _kPrimary),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          _dateOverlay != null
+                              ? Icons.keyboard_arrow_up_rounded
+                              : Icons.keyboard_arrow_down_rounded,
+                          size: 14, color: _kMuted,
+                        ),
+                      ]),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+
+                // ── Person (Assignee) ──────────────────────────────────────
+                _PanelRow(
+                  icon:  Icons.person_outline_rounded,
+                  label: 'Person',
+                  child: item.assignee.isEmpty
+                      ? const Text('Unassigned',
+                          style: TextStyle(fontSize: 12, color: _kMuted))
+                      : Row(children: [
+                          _AssigneeAvatar(item.assignee, radius: 12),
+                          const SizedBox(width: 8),
+                          Text(item.assignee,
+                              style: const TextStyle(
+                                  fontSize: 12, color: _kPrimary)),
+                        ]),
+                ),
+                const SizedBox(height: 14),
+
+                // ── Type ───────────────────────────────────────────────────
                 SelectOptionField(
                   label:           'Type',
                   options:         _typeOpts,
@@ -1212,68 +1279,10 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                     });
                   },
                 ),
-                const SizedBox(height: 14),
-                // Assignee
-                _PanelRow(
-                  icon:  Icons.person_outline_rounded,
-                  label: 'Assignee',
-                  child: item.assignee.isEmpty
-                      ? const Text('Unassigned',
-                          style: TextStyle(fontSize: 12, color: _kMuted))
-                      : Row(children: [
-                          _AssigneeAvatar(item.assignee, radius: 12),
-                          const SizedBox(width: 8),
-                          Text(item.assignee,
-                              style: const TextStyle(
-                                  fontSize: 12, color: _kPrimary)),
-                        ]),
-                ),
-                const SizedBox(height: 14),
-                // Due date — opens overlay popup on tap
-                KeyedSubtree(
-                  key: _dateRowKey,
-                  child: _PanelRow(
-                    icon:  Icons.calendar_today_outlined,
-                    label: 'Due date',
-                    child: GestureDetector(
-                      onTap: _openDateOverlay,
-                      child: Row(children: [
-                        Text(
-                          item.date == null
-                              ? 'Set date'
-                              : (_endDateEnabled && item.endDate != null)
-                                  ? '${_fmtDate(item.date!)}  →  ${_fmtDate(item.endDate!)}'
-                                  : _fmtDate(item.date!),
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: item.date == null ? _kMuted : _kPrimary),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(
-                          _dateOverlay != null
-                              ? Icons.keyboard_arrow_up_rounded
-                              : Icons.keyboard_arrow_down_rounded,
-                          size: 14, color: _kMuted,
-                        ),
-                      ]),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                // Description
-                _PanelSection(
-                  icon:  Icons.notes_rounded,
-                  label: 'Description',
-                  child: Text(
-                    item.description.isEmpty ? 'No description' : item.description,
-                    style: TextStyle(
-                        fontSize: 12,
-                        height:   1.5,
-                        color: item.description.isEmpty ? _kMuted : const Color(0xFF4B5563)),
-                  ),
-                ),
+
                 const Divider(height: 28, color: _kBorder),
-                // ── Comments ──────────────────────────────────────────────
+
+                // ── Comments ───────────────────────────────────────────────
                 Row(children: [
                   const Icon(Icons.chat_bubble_outline_rounded,
                       size: 14, color: _kMuted),
