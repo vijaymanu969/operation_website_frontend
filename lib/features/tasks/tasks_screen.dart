@@ -82,6 +82,30 @@ class _TasksScreenState extends State<TasksScreen> {
   late final AppFlowyBoardScrollController _scrollCtrl;
   TaskItem? _selectedTask;
 
+  // ── Filters ──────────────────────────────────────────────────────────────
+  String?   _filterPerson;
+  String?   _filterType;
+  Priority? _filterPriority;
+  bool?     _filterDone;
+  final     _allTasks = <TaskItem>[];
+
+  Set<String> get _uniqueAssignees =>
+      _allTasks.map((t) => t.assignee).where((a) => a.isNotEmpty).toSet();
+  Set<String> get _uniqueTypes =>
+      _allTasks.map((t) => t.type).where((t) => t.isNotEmpty).toSet();
+
+  bool _matchesFilter(TaskItem item) {
+    if (_filterPerson   != null && item.assignee != _filterPerson)   return false;
+    if (_filterType     != null && item.type     != _filterType)     return false;
+    if (_filterPriority != null && item.priority != _filterPriority) return false;
+    if (_filterDone     != null && item.isDone   != _filterDone)     return false;
+    return true;
+  }
+
+  bool get _hasActiveFilter =>
+      _filterPerson != null || _filterType != null ||
+      _filterPriority != null || _filterDone != null;
+
   @override
   void initState() {
     super.initState();
@@ -170,6 +194,11 @@ class _TasksScreenState extends State<TasksScreen> {
         ),
       ],
     ));
+
+    // Collect all tasks for filter options
+    for (final g in _boardCtrl.groupDatas) {
+      _allTasks.addAll(g.items.cast<TaskItem>());
+    }
   }
 
   @override
@@ -191,6 +220,26 @@ class _TasksScreenState extends State<TasksScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _TopBar(onAddTask: _showAddTaskDialog),
+        // ── Filter bar ──────────────────────────────────────────────────
+        _TaskFilterBar(
+          filterPerson:   _filterPerson,
+          filterType:     _filterType,
+          filterPriority: _filterPriority,
+          filterDone:     _filterDone,
+          assignees:      _uniqueAssignees,
+          types:          _uniqueTypes,
+          hasActive:      _hasActiveFilter,
+          onPersonChanged:   (v) => setState(() => _filterPerson = v),
+          onTypeChanged:     (v) => setState(() => _filterType = v),
+          onPriorityChanged: (v) => setState(() => _filterPriority = v),
+          onDoneChanged:     (v) => setState(() => _filterDone = v),
+          onClearAll: () => setState(() {
+            _filterPerson = null;
+            _filterType = null;
+            _filterPriority = null;
+            _filterDone = null;
+          }),
+        ),
         const SizedBox(height: 4),
         Expanded(
           child: Row(
@@ -205,6 +254,12 @@ class _TasksScreenState extends State<TasksScreen> {
                     boardScrollController:  _scrollCtrl,
                     cardBuilder: (context, group, groupItem) {
                       final item = groupItem as TaskItem;
+                      if (!_matchesFilter(item)) {
+                        return AppFlowyGroupCard(
+                          key: ValueKey('h_${item.id}'),
+                          child: const SizedBox.shrink(),
+                        );
+                      }
                       return AppFlowyGroupCard(
                         key: ValueKey(item.id),
                         child: _TaskCard(
@@ -218,19 +273,7 @@ class _TasksScreenState extends State<TasksScreen> {
                       groupData: groupData,
                       accentColor: _columnColor(groupData.id),
                     ),
-                    footerBuilder: (context, groupData) =>
-                        AppFlowyGroupFooter(
-                      height: 40,
-                      icon: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: Row(children: [
-                          Icon(Icons.add, size: 14, color: _kMuted),
-                          const SizedBox(width: 6),
-                          Text('Add task',
-                              style: TextStyle(fontSize: 12, color: _kMuted)),
-                        ]),
-                      ),
-                    ),
+                    footerBuilder: (_, _) => const SizedBox.shrink(),
                     groupConstraints: const BoxConstraints.tightFor(width: 272),
                     config: AppFlowyBoardConfig(
                       // Column bg slightly off-white so cards (pure white) pop
@@ -639,6 +682,181 @@ class _TopBar extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ─── Reusable: Filter bar ────────────────────────────────────────────────────
+
+class _TaskFilterBar extends StatelessWidget {
+  final String?   filterPerson;
+  final String?   filterType;
+  final Priority? filterPriority;
+  final bool?     filterDone;
+  final Set<String> assignees;
+  final Set<String> types;
+  final bool      hasActive;
+  final ValueChanged<String?>   onPersonChanged;
+  final ValueChanged<String?>   onTypeChanged;
+  final ValueChanged<Priority?> onPriorityChanged;
+  final ValueChanged<bool?>     onDoneChanged;
+  final VoidCallback            onClearAll;
+
+  const _TaskFilterBar({
+    required this.filterPerson,
+    required this.filterType,
+    required this.filterPriority,
+    required this.filterDone,
+    required this.assignees,
+    required this.types,
+    required this.hasActive,
+    required this.onPersonChanged,
+    required this.onTypeChanged,
+    required this.onPriorityChanged,
+    required this.onDoneChanged,
+    required this.onClearAll,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+      child: Row(children: [
+        const Icon(Icons.filter_list_rounded, size: 15, color: _kMuted),
+        const SizedBox(width: 6),
+        const Text('Filter',
+            style: TextStyle(fontSize: 12, color: _kMuted, fontWeight: FontWeight.w500)),
+        const SizedBox(width: 10),
+
+        // Person
+        _FilterDropdown<String>(
+          label:    'Person',
+          value:    filterPerson,
+          items:    assignees.map((a) => MapEntry(a, a)).toList(),
+          onChanged: onPersonChanged,
+        ),
+        const SizedBox(width: 6),
+
+        // Type
+        _FilterDropdown<String>(
+          label:    'Type',
+          value:    filterType,
+          items:    types.map((t) => MapEntry(t, t)).toList(),
+          onChanged: onTypeChanged,
+        ),
+        const SizedBox(width: 6),
+
+        // Priority
+        _FilterDropdown<Priority>(
+          label: 'Priority',
+          value: filterPriority,
+          items: Priority.values.map((p) => MapEntry(p, p.label)).toList(),
+          onChanged: onPriorityChanged,
+        ),
+        const SizedBox(width: 6),
+
+        // Done
+        _FilterDropdown<bool>(
+          label: 'Done',
+          value: filterDone,
+          items: const [MapEntry(true, 'Yes'), MapEntry(false, 'No')],
+          onChanged: onDoneChanged,
+        ),
+
+        // Clear all
+        if (hasActive) ...[
+          const SizedBox(width: 10),
+          GestureDetector(
+            onTap: onClearAll,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color:        _kAccent.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.close, size: 11, color: _kAccent),
+                const SizedBox(width: 3),
+                Text('Clear',
+                    style: TextStyle(fontSize: 11, color: _kAccent, fontWeight: FontWeight.w500)),
+              ]),
+            ),
+          ),
+        ],
+      ]),
+    );
+  }
+}
+
+// ─── Single filter dropdown chip ─────────────────────────────────────────────
+
+class _FilterDropdown<T> extends StatelessWidget {
+  final String label;
+  final T?     value;
+  final List<MapEntry<T, String>> items;
+  final ValueChanged<T?> onChanged;
+
+  const _FilterDropdown({
+    required this.label,
+    required this.value,
+    required this.items,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isActive   = value != null;
+    final displayLbl = isActive
+        ? items.firstWhere((e) => e.key == value, orElse: () => items.first).value
+        : label;
+
+    return PopupMenuButton<T?>(
+      onSelected: (v) => onChanged(v),
+      tooltip: label,
+      position: PopupMenuPosition.under,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      color: Colors.white,
+      elevation: 4,
+      itemBuilder: (_) => [
+        // "All" option to clear
+        PopupMenuItem<T?>(
+          value: null,
+          height: 32,
+          child: Text('All',
+              style: TextStyle(
+                  fontSize: 12,
+                  color: !isActive ? _kAccent : _kPrimary,
+                  fontWeight: !isActive ? FontWeight.w600 : FontWeight.normal)),
+        ),
+        const PopupMenuDivider(height: 1),
+        ...items.map((e) => PopupMenuItem<T?>(
+          value: e.key,
+          height: 32,
+          child: Text(e.value,
+              style: TextStyle(
+                  fontSize: 12,
+                  color: e.key == value ? _kAccent : _kPrimary,
+                  fontWeight: e.key == value ? FontWeight.w600 : FontWeight.normal)),
+        )),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color:        isActive ? _kPrimary : _kSurface,
+          borderRadius: BorderRadius.circular(4),
+          border:       Border.all(color: isActive ? _kPrimary : _kBorder),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(displayLbl,
+              style: TextStyle(
+                  fontSize:   11,
+                  fontWeight: FontWeight.w500,
+                  color:      isActive ? Colors.white : _kPrimary)),
+          const SizedBox(width: 3),
+          Icon(Icons.keyboard_arrow_down_rounded,
+              size: 13, color: isActive ? Colors.white : _kMuted),
+        ]),
       ),
     );
   }

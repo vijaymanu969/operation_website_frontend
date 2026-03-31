@@ -167,8 +167,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   Timer? _perfReportTimer;
 
   // per-event timing (latest jumpTo latency)
-  DateTime? _lastPointerTime;
   final Stopwatch _jumpToWatch = Stopwatch();
+
+  bool _isShiftHeld(PointerScrollEvent event) =>
+      HardwareKeyboard.instance.isShiftPressed;
 
   @override
   void initState() {
@@ -571,19 +573,36 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         ),
 
         // ── Body: fixed date column LEFT | scrollable employee cells RIGHT ──
-        // No ListenableBuilder, no Transform.translate.
-        // Flutter's SingleChildScrollView handles h-scroll natively (paint-only).
+        // Listener wraps both columns so scroll works everywhere.
+        // Normal wheel → vertical, Shift+wheel → horizontal.
         Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // LEFT: fixed date + delete column (mouse-wheel = vertical scroll)
-              SizedBox(
-                width: delWidth + dateWidth,
-                child: ListView.builder(
-                  controller: _vScroll,
-                  itemCount: _rows.length,
-                  itemExtent: rowH,
+          child: Listener(
+            onPointerSignal: (event) {
+              // Normal wheel (no horizontal delta) → vertical scroll
+              if (event is PointerScrollEvent &&
+                  event.scrollDelta.dx == 0 &&
+                  event.scrollDelta.dy != 0 &&
+                  !_isShiftHeld(event) &&
+                  _vScroll.hasClients) {
+                _vScroll.jumpTo(
+                  (_vScroll.offset + event.scrollDelta.dy)
+                      .clamp(0.0, _vScroll.position.maxScrollExtent),
+                );
+              }
+              // Shift+wheel and native horizontal scroll are handled
+              // by the horizontal SingleChildScrollView's own physics.
+            },
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // LEFT: fixed date + delete column
+                SizedBox(
+                  width: delWidth + dateWidth,
+                  child: ListView.builder(
+                    controller: _vScroll,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _rows.length,
+                    itemExtent: rowH,
                   itemBuilder: (_, i) {
                     final row = _rows[i];
                     final isHoliday = _kEmployees.every(
@@ -644,37 +663,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 ),
               ),
 
-              // RIGHT: employee cells — one SingleChildScrollView for h-scroll.
-              // Mouse-wheel over this area → horizontal scroll (via Listener).
-              // Vertical scroll is driven by _vScroll2 synced with left _vScroll.
+              // RIGHT: employee cells — h-scroll via SingleChildScrollView,
+              // v-scroll synced from _vScroll via _onVScrollChange.
               Expanded(
-                child: Listener(
-                  onPointerSignal: (event) {
-                    if (event is PointerScrollEvent && _hScrollEmp.hasClients) {
-                      final now = DateTime.now();
-                      final gap = _lastPointerTime != null
-                          ? now.difference(_lastPointerTime!).inMilliseconds : 0;
-                      _lastPointerTime = now;
-                      _pointerEvents++;
-                      _jumpToWatch..reset()..start();
-                      // Drive _hScrollEmp; _onHScrollEmpChange syncs header + bar.
-                      _hScrollEmp.jumpTo(
-                        (_hScrollEmp.offset + event.scrollDelta.dy)
-                            .clamp(0.0, _hScrollEmp.position.maxScrollExtent),
-                      );
-                      _jumpToWatch.stop();
-                      debugPrint(
-                        '[Scroll] Δt=${gap}ms  Δ=${event.scrollDelta.dy.toStringAsFixed(1)}  '
-                        'offset=${_hScrollEmp.offset.toStringAsFixed(1)}  '
-                        'jumpTo=${_jumpToWatch.elapsedMicroseconds}µs',
-                      );
-                    }
-                  },
-                  child: SingleChildScrollView(
+                child: SingleChildScrollView(
                     controller: _hScrollEmp,
                     scrollDirection: Axis.horizontal,
-                    // NeverScrollable: only moves via _hScrollEmp.jumpTo (from Listener or scrollbar).
-                    physics: const NeverScrollableScrollPhysics(),
+                    // Default physics: handles drag + Shift+wheel (browser sends dx) natively.
+                    // Vertical wheel is intercepted by the Listener above.
                     child: SizedBox(
                       width: totalEmpW,
                       child: ListView.builder(
@@ -731,8 +727,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
 
