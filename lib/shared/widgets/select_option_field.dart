@@ -511,167 +511,85 @@ class _OptionRow extends StatefulWidget {
 }
 
 class _OptionRowState extends State<_OptionRow> {
-  bool _renaming = false;
-  late final _renameCtrl  = TextEditingController(text: widget.option.name);
-  final       _renameFocus = FocusNode();
+  bool _showColors = false;
 
-  @override
-  void didUpdateWidget(covariant _OptionRow old) {
-    super.didUpdateWidget(old);
-    if (old.option.name != widget.option.name && !_renaming) {
-      _renameCtrl.text = widget.option.name;
-    }
-  }
-
-  @override
-  void dispose() {
-    _renameCtrl.dispose();
-    _renameFocus.dispose();
-    super.dispose();
-  }
-
-  void _commitRename() {
-    final name = _renameCtrl.text.trim();
-    if (name.isNotEmpty && name != widget.option.name) {
-      widget.onRename(name);
-    }
-    if (mounted) setState(() => _renaming = false);
-  }
-
-  Future<void> _openContextMenu(BuildContext ctx) async {
-    final rb  = ctx.findRenderObject() as RenderBox;
-    final pos = rb.localToGlobal(Offset.zero);
-
-    final result = await showMenu<String>(
-      context:  ctx,
-      position: RelativeRect.fromLTRB(
-          pos.dx, pos.dy, pos.dx + 160, pos.dy + 120),
-      shape:    RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      color:    Colors.white,
-      elevation: 4,
-      items: [
-        PopupMenuItem(
-          value:  'rename',
-          height: 36,
-          child:  _MenuItemRow(Icons.edit_outlined, 'Rename'),
-        ),
-        PopupMenuItem(
-          value:  'delete',
-          height: 36,
-          child:  _MenuItemRow(Icons.delete_outline_rounded, 'Delete'),
-        ),
-        const PopupMenuDivider(height: 1),
-        // Color swatches row
-        PopupMenuItem(
-          enabled: false,
-          height:  48,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Wrap(
-            spacing: 8,
-            children: SelectOptionColor.values.map((c) {
-              final (bg, text) = _colorsFor(c);
-              final isCurrent  = c == widget.option.color;
-              return GestureDetector(
-                onTap: () {
-                  Navigator.pop(ctx);
-                  widget.onColor(c);
-                },
-                child: Container(
-                  width:  22, height: 22,
-                  decoration: BoxDecoration(
-                    color:  bg,
-                    shape:  BoxShape.circle,
-                    border: Border.all(
-                      color: isCurrent ? text : text.withValues(alpha: 0.35),
-                      width: isCurrent ? 2    : 1,
-                    ),
-                  ),
-                  child: isCurrent
-                      ? Icon(Icons.check_rounded, size: 11, color: text)
-                      : null,
-                ),
-              );
-            }).toList(),
-          ),
-        ),
-      ],
-    );
-
-    if (!mounted) return;
-    if (result == 'rename') {
-      setState(() {
-        _renaming        = true;
-        _renameCtrl.text = widget.option.name;
-      });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _renameFocus.requestFocus();
-        _renameCtrl.selection = TextSelection(
-            baseOffset: 0, extentOffset: _renameCtrl.text.length);
-      });
-    } else if (result == 'delete') {
-      widget.onDelete();
-    }
+  void _showColorPicker() {
+    setState(() => _showColors = !_showColors);
   }
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: _renaming ? null : widget.onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-        child: Row(children: [
-          // ⠿ Drag handle (visual only for now)
-          const Icon(Icons.drag_indicator,
-              size: 16, color: Color(0xFFD1D5DB)),
-          const SizedBox(width: 6),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          onTap: widget.onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            child: Row(children: [
+              // Drag handle
+              const Icon(Icons.drag_indicator,
+                  size: 16, color: Color(0xFFD1D5DB)),
+              const SizedBox(width: 6),
 
-          // Pill or inline rename field
-          Expanded(
-            child: _renaming
-                ? TextField(
-                    controller:        _renameCtrl,
-                    focusNode:         _renameFocus,
-                    style:             const TextStyle(fontSize: 12),
-                    decoration: const InputDecoration(
-                      border:         InputBorder.none,
-                      isDense:        true,
-                      contentPadding: EdgeInsets.symmetric(vertical: 2),
-                    ),
-                    onSubmitted:       (_) => _commitRename(),
-                    onEditingComplete: _commitRename,
-                  )
-                : OptionPill(
+              // Pill – tap to show color picker
+              Expanded(
+                child: GestureDetector(
+                  onTap: _showColorPicker,
+                  child: OptionPill(
                     option:     widget.option,
                     isSelected: widget.isSelected,
                   ),
-          ),
-          const SizedBox(width: 6),
-
-          // Right action button
-          if (_renaming)
-            // ✓ confirm rename
-            GestureDetector(
-              onTap: _commitRename,
-              child: const Padding(
-                padding: EdgeInsets.all(4),
-                child: Icon(Icons.check_rounded,
-                    size: 16, color: Color(0xFF10B981)),
+                ),
               ),
-            )
-          else
-            // … three-dot context menu
-            Builder(
-              builder: (ctx) => GestureDetector(
-                onTap: () => _openContextMenu(ctx),
+              const SizedBox(width: 6),
+
+              // X delete button
+              GestureDetector(
+                onTap: widget.onDelete,
                 child: Padding(
                   padding: const EdgeInsets.all(4),
-                  child: Icon(Icons.more_horiz_rounded,
+                  child: Icon(Icons.close_rounded,
                       size: 16, color: Colors.grey[400]),
                 ),
               ),
+            ]),
+          ),
+        ),
+
+        // Color picker row (shown when pill is tapped)
+        if (_showColors)
+          Padding(
+            padding: const EdgeInsets.only(left: 30, right: 30, bottom: 6),
+            child: Wrap(
+              spacing: 8,
+              children: SelectOptionColor.values.map((c) {
+                final (bg, text) = _colorsFor(c);
+                final isCurrent  = c == widget.option.color;
+                return GestureDetector(
+                  onTap: () {
+                    widget.onColor(c);
+                    setState(() => _showColors = false);
+                  },
+                  child: Container(
+                    width:  22, height: 22,
+                    decoration: BoxDecoration(
+                      color:  bg,
+                      shape:  BoxShape.circle,
+                      border: Border.all(
+                        color: isCurrent ? text : text.withValues(alpha: 0.35),
+                        width: isCurrent ? 2    : 1,
+                      ),
+                    ),
+                    child: isCurrent
+                        ? Icon(Icons.check_rounded, size: 11, color: text)
+                        : null,
+                  ),
+                );
+              }).toList(),
             ),
-        ]),
-      ),
+          ),
+      ],
     );
   }
 }
@@ -717,20 +635,3 @@ class OptionPill extends StatelessWidget {
   }
 }
 
-// ─── Menu item row ────────────────────────────────────────────────────────────
-
-class _MenuItemRow extends StatelessWidget {
-  final IconData icon;
-  final String   label;
-  const _MenuItemRow(this.icon, this.label);
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(children: [
-      Icon(icon, size: 14, color: const Color(0xFF6B7280)),
-      const SizedBox(width: 8),
-      Text(label,
-          style: const TextStyle(fontSize: 13, color: Color(0xFF1A1A2E))),
-    ]);
-  }
-}
