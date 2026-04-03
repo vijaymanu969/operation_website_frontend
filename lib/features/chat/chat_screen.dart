@@ -1,3 +1,5 @@
+import 'dart:ui' show ImageFilter;
+import 'dart:math' show min;
 import 'package:flutter/material.dart';
 
 // ── Design tokens (match the rest of the app) ──────────────────────────────────
@@ -638,6 +640,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 task:     task,
                 onReject:   () => setState(() => task.reviewStatus = _TaskReviewStatus.rejected),
                 onComplete: () => setState(() => task.reviewStatus = _TaskReviewStatus.completed),
+                onTap:      () => _showTaskPreview(context, task),
               ),
               const SizedBox(height: 4),
               Text('${contact.name}, ${msg.time}',
@@ -647,6 +650,206 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
+  }
+
+  // ── Task preview dialog ──────────────────────────────────────────────────────
+
+  void _showTaskPreview(BuildContext context, _ChatTask task) {
+    final isCompleted = task.reviewStatus == _TaskReviewStatus.completed;
+    final isRejected  = task.reviewStatus == _TaskReviewStatus.rejected;
+
+    final priorityColor = switch (task.priority) {
+      'High'   => const Color(0xFFEF4444),
+      'Medium' => const Color(0xFFF59E0B),
+      'Low'    => const Color(0xFF3B82F6),
+      _        => const Color(0xFF9CA3AF),
+    };
+
+    final statusColor = isCompleted
+        ? const Color(0xFF10B981)
+        : isRejected
+            ? const Color(0xFFEF4444)
+            : const Color(0xFFF59E0B);
+    final statusLabel = isCompleted ? 'Completed' : isRejected ? 'Rejected' : 'In Review';
+
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: Colors.black45,
+      transitionDuration: const Duration(milliseconds: 200),
+      transitionBuilder: (_, anim, _, child) => FadeTransition(
+        opacity: anim,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.96, end: 1.0)
+              .animate(CurvedAnimation(parent: anim, curve: Curves.easeOutCubic)),
+          child: child,
+        ),
+      ),
+      pageBuilder: (ctx, _, _) => Stack(
+        children: [
+          BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+            child: const SizedBox.expand(),
+          ),
+          Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: min(560.0, MediaQuery.of(ctx).size.width * 0.9),
+                margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+                decoration: BoxDecoration(
+                  color:        Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black26, blurRadius: 40, offset: Offset(0, 12)),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // ── Header ─────────────────────────────────────────────
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                      decoration: const BoxDecoration(
+                        border: Border(bottom: BorderSide(color: Color(0xFFE8ECF3))),
+                      ),
+                      child: Row(children: [
+                        Expanded(
+                          child: Text(task.title,
+                              style: const TextStyle(
+                                  fontSize: 18, fontWeight: FontWeight.w700,
+                                  color: Color(0xFF1A1A2E))),
+                        ),
+                        InkWell(
+                          onTap: () => Navigator.of(ctx).pop(),
+                          borderRadius: BorderRadius.circular(6),
+                          child: Container(
+                            width: 28, height: 28,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF7F8FA),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: const Color(0xFFE8ECF3)),
+                            ),
+                            child: const Icon(Icons.close, size: 14, color: Color(0xFF9CA3AF)),
+                          ),
+                        ),
+                      ]),
+                    ),
+
+                    // ── Body ───────────────────────────────────────────────
+                    Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Description
+                          if (task.description.isNotEmpty) ...[
+                            Text(task.description,
+                                style: const TextStyle(
+                                    fontSize: 13, color: Color(0xFF4B5563), height: 1.5)),
+                            const SizedBox(height: 16),
+                          ],
+
+                          // Status
+                          _previewRow(Icons.check_circle_outline_rounded, 'Status',
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: statusColor.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(statusLabel,
+                                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                                      color: statusColor)),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+
+                          // Priority
+                          _previewRow(Icons.flag_outlined, 'Priority',
+                            Row(mainAxisSize: MainAxisSize.min, children: [
+                              Container(width: 8, height: 8,
+                                  decoration: BoxDecoration(
+                                      color: priorityColor, shape: BoxShape.circle)),
+                              const SizedBox(width: 6),
+                              Text(task.priority,
+                                  style: const TextStyle(fontSize: 12, color: Color(0xFF1A1A2E))),
+                            ]),
+                          ),
+                          const SizedBox(height: 10),
+
+                          // Type
+                          _previewRow(Icons.label_outline_rounded, 'Type',
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF6366F1).withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(task.type,
+                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                                      color: Color(0xFF6366F1))),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+
+                          // Assignee
+                          _previewRow(Icons.person_outline_rounded, 'Person',
+                            Row(mainAxisSize: MainAxisSize.min, children: [
+                              CircleAvatar(
+                                radius: 10,
+                                backgroundColor: Color(0xFF6366F1 + (task.assignee.hashCode & 0x00FFFFFF)),
+                                child: Text(task.assignee.isNotEmpty ? task.assignee[0].toUpperCase() : '?',
+                                    style: const TextStyle(fontSize: 9, color: Colors.white,
+                                        fontWeight: FontWeight.w600)),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(task.assignee,
+                                  style: const TextStyle(fontSize: 12, color: Color(0xFF1A1A2E))),
+                            ]),
+                          ),
+                          const SizedBox(height: 10),
+
+                          // Date
+                          _previewRow(Icons.calendar_today_outlined, 'Due date',
+                            Text(task.date,
+                                style: const TextStyle(fontSize: 12, color: Color(0xFF1A1A2E))),
+                          ),
+
+                          // Comments
+                          if (task.commentCount > 0) ...[
+                            const SizedBox(height: 10),
+                            _previewRow(Icons.chat_bubble_outline_rounded, 'Comments',
+                              Text('${task.commentCount}',
+                                  style: const TextStyle(fontSize: 12, color: Color(0xFF1A1A2E))),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _previewRow(IconData icon, String label, Widget value) {
+    return Row(children: [
+      Icon(icon, size: 14, color: const Color(0xFF9CA3AF)),
+      const SizedBox(width: 8),
+      SizedBox(
+        width: 70,
+        child: Text(label,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF9CA3AF))),
+      ),
+      value,
+    ]);
   }
 
   // ── Bottom input bar ────────────────────────────────────────────────────────
@@ -778,14 +981,16 @@ const _kLow    = Color(0xFF3B82F6);
 const _kMuted  = Color(0xFF9CA3AF);
 
 class _ChatTaskCard extends StatelessWidget {
-  final _ChatTask   task;
+  final _ChatTask    task;
   final VoidCallback onReject;
   final VoidCallback onComplete;
+  final VoidCallback? onTap;
 
   const _ChatTaskCard({
     required this.task,
     required this.onReject,
     required this.onComplete,
+    this.onTap,
   });
 
   Color get _priorityColor => switch (task.priority) {
@@ -807,7 +1012,9 @@ class _ChatTaskCard extends StatelessWidget {
             ? _kHigh
             : _kBorder;
 
-    return Container(
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
       width: 320,
       decoration: BoxDecoration(
         color:        Colors.white,
@@ -991,6 +1198,7 @@ class _ChatTaskCard extends StatelessWidget {
               ),
             ),
         ],
+      ),
       ),
     );
   }
