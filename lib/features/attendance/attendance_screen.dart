@@ -172,6 +172,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   bool _isShiftHeld(PointerScrollEvent event) =>
       HardwareKeyboard.instance.isShiftPressed;
 
+  // Track right mouse button state for horizontal scroll gesture.
+  bool _rightButtonHeld = false;
+
   @override
   void initState() {
     super.initState();
@@ -402,6 +405,84 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     return true;
   }
 
+  /// Format hour in 12-hour style (e.g. 13 → 01, 9 → 09).
+  String _fmt12(int hour24) {
+    final h = hour24 % 12;
+    return (h == 0 ? 12 : h).toString().padLeft(2, '0');
+  }
+
+  /// Double-tap logic:
+  /// - Empty cell → pick login time, store as "HH:MM-"
+  /// - Cell has "HH:MM-" (login only) → pick logout, calculate hours worked
+  Future<void> _pickTime(int rowIndex, String emp) async {
+    final row = _rows[rowIndex];
+    final ctrl = _controllers['${rowIndex}_$emp']!;
+    final current = (row[emp] ?? '').trim();
+
+    // Check if login is already filled (format: "HH:MM-")
+    final hasLogin = RegExp(r'^\d{2}:\d{2}-$').hasMatch(current);
+
+    if (!hasLogin) {
+      // ── Morning: pick login time ──
+      final loginTime = await showTimePicker(
+        context: context,
+        initialTime: const TimeOfDay(hour: 9, minute: 0),
+        helpText: 'Select login time',
+        builder: (ctx, child) => MediaQuery(
+          data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: false),
+          child: child!,
+        ),
+      );
+      if (loginTime == null || !mounted) return;
+
+      final value = '${_fmt12(loginTime.hour)}:'
+          '${loginTime.minute.toString().padLeft(2, '0')}-';
+
+      setState(() {
+        row[emp] = value;
+        ctrl.text = value;
+        _cachedSummaries = null;
+      });
+    } else {
+      // ── Evening: pick logout time, calculate hours worked ──
+      final logoutTime = await showTimePicker(
+        context: context,
+        initialTime: const TimeOfDay(hour: 6, minute: 0),
+        helpText: 'Select logout time',
+        builder: (ctx, child) => MediaQuery(
+          data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: false),
+          child: child!,
+        ),
+      );
+      if (logoutTime == null || !mounted) return;
+
+      // Parse the stored login time
+      final loginParts = current.replaceAll('-', '').split(':');
+      final loginMins = (int.tryParse(loginParts[0]) ?? 0) * 60.0 +
+          (int.tryParse(loginParts[1]) ?? 0);
+      // Logout in 12h: if picked hour <= login hour, it's PM offset
+      final logoutH = logoutTime.hour % 12;
+      final logoutMins = logoutH * 60.0 + logoutTime.minute;
+
+      double diff = logoutMins - loginMins;
+      if (diff < 0) diff += 12 * 60;
+      final workedH = (diff / 60).floor();
+      final workedM = (diff % 60).round();
+
+      final workedStr = workedM > 0
+          ? '$workedH:${workedM.toString().padLeft(2, '0')}'
+          : '$workedH';
+      final value = '$current$workedStr';
+
+      setState(() {
+        row[emp] = value;
+        ctrl.text = value;
+        _cachedSummaries = null;
+      });
+    }
+    _scheduleAnalysisUpdate();
+  }
+
   /// Schedule an analysis refresh 600 ms after the last keystroke.
   void _scheduleAnalysisUpdate() {
     _analysisDebounce?.cancel();
@@ -577,20 +658,38 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         // Normal wheel → vertical, Shift+wheel → horizontal.
         Expanded(
           child: Listener(
-            onPointerSignal: (event) {
-              // Normal wheel (no horizontal delta) → vertical scroll
-              if (event is PointerScrollEvent &&
-                  event.scrollDelta.dx == 0 &&
-                  event.scrollDelta.dy != 0 &&
-                  !_isShiftHeld(event) &&
-                  _vScroll.hasClients) {
-                _vScroll.jumpTo(
-                  (_vScroll.offset + event.scrollDelta.dy)
-                      .clamp(0.0, _vScroll.position.maxScrollExtent),
-                );
+            onPointerDown: (event) {
+              if (event.buttons & kSecondaryMouseButton != 0) {
+                _rightButtonHeld = true;
               }
-              // Shift+wheel and native horizontal scroll are handled
-              // by the horizontal SingleChildScrollView's own physics.
+            },
+            onPointerUp: (event) {
+              _rightButtonHeld = false;
+            },
+            onPointerCancel: (event) {
+              _rightButtonHeld = false;
+            },
+            onPointerSignal: (event) {
+              if (event is PointerScrollEvent) {
+                // Right-click held + scroll → horizontal scroll
+                if (_rightButtonHeld && _hScrollEmp.hasClients) {
+                  _syncHTo(
+                    (_hScrollEmp.offset + event.scrollDelta.dy)
+                        .clamp(0.0, _hScrollEmp.position.maxScrollExtent),
+                  );
+                  return;
+                }
+                // Normal wheel (no horizontal delta) → vertical scroll
+                if (event.scrollDelta.dx == 0 &&
+                    event.scrollDelta.dy != 0 &&
+                    !_isShiftHeld(event) &&
+                    _vScroll.hasClients) {
+                  _vScroll.jumpTo(
+                    (_vScroll.offset + event.scrollDelta.dy)
+                        .clamp(0.0, _vScroll.position.maxScrollExtent),
+                  );
+                }
+              }
             },
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -607,7 +706,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     final row = _rows[i];
                     final isHoliday = _kEmployees.every(
                         (e) => _isHoliday(row[e] ?? ''));
-                    return Container(
+                    return GestureDetector(
+                      onDoubleTap: i == _rows.length - 1
+                          ? () => _addRow(focusAfter: true)
+                          : null,
+                      child: Container(
                       height: rowH,
                       decoration: BoxDecoration(
                         color: isHoliday
@@ -658,6 +761,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                           ),
                         ),
                       ]),
+                    ),
                     );
                   },
                 ),
@@ -694,10 +798,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                                 } else if (!_isHoliday(raw) && parsed == null) {
                                   bg = const Color(0xFFFFEBEE);
                                 }
-                                return Container(
+                                return _TimeCellWithHoverClear(
                                   width: colWidth,
-                                  color: bg,
-                                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                                  bg: bg,
+                                  hasValue: raw.isNotEmpty,
+                                  onDoubleTap: () => _pickTime(i, emp),
+                                  onClear: () {
+                                    setState(() {
+                                      row[emp] = '';
+                                      _controllers['${i}_$emp']!.text = '';
+                                      _cachedSummaries = null;
+                                    });
+                                    _scheduleAnalysisUpdate();
+                                  },
                                   child: TextField(
                                     controller: _controllers['${i}_$emp']!,
                                     focusNode:  _focusNodes['${i}_$emp'],
@@ -756,6 +869,68 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ─── Time cell with hover X to clear ─────────────────────────────────────────
+
+class _TimeCellWithHoverClear extends StatefulWidget {
+  final double width;
+  final Color? bg;
+  final bool hasValue;
+  final VoidCallback onDoubleTap;
+  final VoidCallback onClear;
+  final Widget child;
+
+  const _TimeCellWithHoverClear({
+    required this.width,
+    required this.bg,
+    required this.hasValue,
+    required this.onDoubleTap,
+    required this.onClear,
+    required this.child,
+  });
+
+  @override
+  State<_TimeCellWithHoverClear> createState() =>
+      _TimeCellWithHoverClearState();
+}
+
+class _TimeCellWithHoverClearState extends State<_TimeCellWithHoverClear> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit:  (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onDoubleTap: widget.onDoubleTap,
+        child: Container(
+          width: widget.width,
+          color: widget.bg,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Stack(
+            alignment: Alignment.centerRight,
+            children: [
+              widget.child,
+              if (_hovered && widget.hasValue)
+                GestureDetector(
+                  onTap: widget.onClear,
+                  child: Container(
+                    width: 18, height: 18,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.close, size: 11, color: Colors.black54),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
