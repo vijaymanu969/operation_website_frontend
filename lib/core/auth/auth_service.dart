@@ -1,36 +1,46 @@
 import 'package:shared_preferences/shared_preferences.dart';
-import 'user_role.dart';
+import '../models/user.dart';
 
 class AuthService {
-  static const _roleKey = 'mock_role';
-  static const _loggedInKey = 'mock_logged_in';
+  static const _tokenKey = 'auth_token';
+  String? _cachedToken;
+  User? _cachedUser;
 
-  Future<UserRole> login(String email, String password, UserRole role) async {
-    // Mock login — no backend call, just persist chosen role
-    await Future.delayed(const Duration(milliseconds: 300));
+  /// Get stored JWT token
+  Future<String?> getToken() async {
+    if (_cachedToken != null) return _cachedToken;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_loggedInKey, true);
-    await prefs.setString(_roleKey, role.name);
-    return role;
+    _cachedToken = prefs.getString(_tokenKey);
+    return _cachedToken;
   }
 
-  Future<void> logout() async {
+  /// Save JWT token and user data after login
+  Future<void> saveSession(String token, User user) async {
+    _cachedToken = token;
+    _cachedUser = user;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_loggedInKey);
-    await prefs.remove(_roleKey);
+    await prefs.setString(_tokenKey, token);
   }
 
-  Future<bool> isAuthenticated() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_loggedInKey) ?? false;
+  /// Get cached user (set after login or checkAuth)
+  User? get currentUser => _cachedUser;
+
+  /// Update cached user (e.g. after fetching /auth/me)
+  void setCurrentUser(User user) {
+    _cachedUser = user;
   }
 
-  Future<UserRole> getSavedRole() async {
+  /// Check if a token exists (doesn't validate it — API call will)
+  Future<bool> hasToken() async {
+    final token = await getToken();
+    return token != null && token.isNotEmpty;
+  }
+
+  /// Clear everything on logout
+  Future<void> clearSession() async {
+    _cachedToken = null;
+    _cachedUser = null;
     final prefs = await SharedPreferences.getInstance();
-    final roleName = prefs.getString(_roleKey) ?? 'staff';
-    return UserRole.values.firstWhere(
-      (r) => r.name == roleName,
-      orElse: () => UserRole.staff,
-    );
+    await prefs.remove(_tokenKey);
   }
 }

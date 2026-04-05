@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../core/api/api_client.dart';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const _kAccent  = Color(0xFFE94560);
@@ -122,6 +124,12 @@ class AttendanceScreen extends StatefulWidget {
 
 class _AttendanceScreenState extends State<AttendanceScreen> {
   final List<Map<String, String>> _rows = [];
+  bool _loadingData = true;
+
+  // Dynamic employee list — loaded from backend users
+  List<String> _employees = List<String>.from(_kEmployees);
+  // Map user_name (uppercase) → user_id for saving
+  Map<String, String> _employeeIds = {};
 
   // Controllers & focus nodes keyed by "${row}_${emp}" or row index for date
   final Map<String, TextEditingController> _controllers   = {};
@@ -130,7 +138,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   final List<FocusNode>                    _dateFocus     = [];
 
   // col 0 = date, col 1..N = employee columns
-  int get _totalCols => 1 + _kEmployees.length;
+  int get _totalCols => 1 + _employees.length;
+
+  ApiClient get _api => context.read<ApiClient>();
 
   // ── Scroll controllers ───────────────────────────────────────────────────────
   // _hScroll    → header employee-name SingleChildScrollView
@@ -147,9 +157,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   bool _syncingH = false;
   bool _syncingV = false;
 
-  // Cached summaries — invalidated when data changes, rebuilt lazily.
+  // Cached summaries �� invalidated when data changes, rebuilt lazily.
   List<_EmployeeSummary>? _cachedSummaries;
   Timer? _analysisDebounce;
+  Timer? _saveDebounce;
+
+  /// Debounce save — waits 2 seconds of inactivity then bulk-saves
+  void _scheduleSave() {
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(seconds: 2), _saveAttendance);
+  }
 
   // ── asdf sequence tracker ────────────────────────────────────────────────────
   // Tracks progress through the 'asdf' shortcut sequence across outer-focus keys.
@@ -178,7 +195,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   @override
   void initState() {
     super.initState();
-    _seedData();
+    _loadAttendance();
     _hScroll.addListener(_onHScrollChange);
     _hScrollEmp.addListener(_onHScrollEmpChange);
     _hScrollBar.addListener(_onHScrollBarChange);
@@ -229,7 +246,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   FocusNode? _fn(int row, int col) {
     if (row < 0 || row >= _rows.length) return null;
     if (col == 0) return row < _dateFocus.length ? _dateFocus[row] : null;
-    final emp = _kEmployees[col - 1];
+    final emp = _employees[col - 1];
     return _focusNodes['${row}_$emp'];
   }
 
@@ -276,13 +293,109 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   // ── Data management ─────────────────────────────────────────────────────────
 
-  void _seedData() {
-    for (final entry in _kSeedData.entries) {
-      final row = <String, String>{'date': entry.key};
-      for (final emp in _kEmployees) { row[emp] = entry.value[emp] ?? ''; }
-      _rows.add(row);
+  Future<void> _loadAttendance() async {
+    setState(() => _loadingData = true);
+    try {
+      // 1. Load users to build dynamic employee list
+      final usersRes = await _api.getUsers();
+      final users = (usersRes.data as List).cast<Map<String, dynamic>>();
+      _employees = users
+          .where((u) => u['is_active'] == true)
+          .map((u) => (u['name'] as String).toUpperCase())
+          .toList();
+      _employeeIds = {
+        for (final u in users)
+          (u['name'] as String).toUpperCase(): u['id'] as String,
+      };
+
+      // 2. Load attendance for current month
+      final now = DateTime.now();
+      final startDate = '${now.year}-${now.month.toString().padLeft(2, '0')}-01';
+      final endDate = '${now.year}-${now.month.toString().padLeft(2, '0')}-${DateTime(now.year, now.month + 1, 0).day}';
+      final attRes = await _api.getAttendance(startDate: startDate, endDate: endDate);
+      final attData = (attRes.data as List).cast<Map<String, dynamic>>();
+
+      // 3. Transform API data → row format: {date: 'DD-MM-YYYY', EMPLOYEE: 'raw_value', ...}
+      final rowMap = <String, Map<String, String>>{}; // date string → row
+      for (final entry in attData) {
+        final dateStr = entry['date'] as String; // YYYY-MM-DD
+        final parts = dateStr.split('-');
+        final displayDate = '${parts[2]}-${parts[1]}-${parts[0]}'; // DD-MM-YYYY
+        final userName = (entry['user_name'] as String? ?? '').toUpperCase();
+        final rawValue = entry['raw_value'] as String? ?? '';
+
+        rowMap.putIfAbsent(displayDate, () {
+          final row = <String, String>{'date': displayDate};
+          for (final emp in _employees) { row[emp] = ''; }
+          return row;
+        });
+        rowMap[displayDate]![userName] = rawValue;
+      }
+
+      // Sort rows by date
+      final sortedKeys = rowMap.keys.toList()..sort((a, b) {
+        final ap = a.split('-');
+        final bp = b.split('-');
+        final da = DateTime(int.parse(ap[2]), int.parse(ap[1]), int.parse(ap[0]));
+        final db = DateTime(int.parse(bp[2]), int.parse(bp[1]), int.parse(bp[0]));
+        return da.compareTo(db);
+      });
+
+      _rows.clear();
+      for (final key in sortedKeys) {
+        _rows.add(rowMap[key]!);
+      }
+
+      // If no data, add at least one empty row for today
+      if (_rows.isEmpty) {
+        final today = DateTime.now();
+        final row = <String, String>{
+          'date': '${today.day.toString().padLeft(2, '0')}-${today.month.toString().padLeft(2, '0')}-${today.year}',
+        };
+        for (final emp in _employees) { row[emp] = ''; }
+        _rows.add(row);
+      }
+
+      _rebuildCells();
+    } catch (_) {
+      // Fallback to seed data if API fails
+      for (final entry in _kSeedData.entries) {
+        final row = <String, String>{'date': entry.key};
+        for (final emp in _kEmployees) { row[emp] = entry.value[emp] ?? ''; }
+        _rows.add(row);
+      }
+      _employees = List<String>.from(_kEmployees);
+      _rebuildCells();
     }
-    _rebuildCells();
+    if (mounted) setState(() => _loadingData = false);
+  }
+
+  /// Save all attendance data to backend via bulk upsert
+  Future<void> _saveAttendance() async {
+    final bulkRows = <Map<String, dynamic>>[];
+    for (final row in _rows) {
+      final dateStr = row['date'] ?? '';
+      if (dateStr.isEmpty) continue;
+      final parts = dateStr.split('-');
+      if (parts.length != 3) continue;
+      final apiDate = '${parts[2]}-${parts[1]}-${parts[0]}'; // YYYY-MM-DD
+
+      for (final emp in _employees) {
+        final userId = _employeeIds[emp];
+        if (userId == null) continue;
+        final rawValue = row[emp] ?? '';
+        bulkRows.add({
+          'user_id': userId,
+          'date': apiDate,
+          'raw_value': rawValue,
+        });
+      }
+    }
+    if (bulkRows.isNotEmpty) {
+      try {
+        await _api.bulkUpsertAttendance(bulkRows);
+      } catch (_) {}
+    }
   }
 
   /// Full rebuild of controllers + focus nodes from _rows.
@@ -299,8 +412,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     for (var i = 0; i < _rows.length; i++) {
       _dateCtrl.add(TextEditingController(text: _rows[i]['date'] ?? ''));
       _dateFocus.add(_makeFN(i, 0));
-      for (var j = 0; j < _kEmployees.length; j++) {
-        final emp = _kEmployees[j];
+      for (var j = 0; j < _employees.length; j++) {
+        final emp = _employees[j];
         _controllers['${i}_$emp'] =
             TextEditingController(text: _rows[i][emp] ?? '');
         _focusNodes['${i}_$emp'] = _makeFN(i, j + 1);
@@ -332,7 +445,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   void _addRow({bool focusAfter = false}) {
     final date = _nextDate();
     final row  = <String, String>{'date': date};
-    for (final emp in _kEmployees) { row[emp] = ''; }
+    for (final emp in _employees) { row[emp] = ''; }
     setState(() {
       _rows.add(row);
       _rebuildCells();
@@ -369,6 +482,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   void dispose() {
     _perfReportTimer?.cancel();
     _analysisDebounce?.cancel();
+    _saveDebounce?.cancel();
     for (final c in _controllers.values) { c.dispose(); }
     for (final f in _focusNodes.values)  { f.dispose(); }
     for (final c in _dateCtrl)           { c.dispose(); }
@@ -388,7 +502,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   // ── Analysis cache helpers ───────────────────────────────────────────────────
   List<_EmployeeSummary> get _summaries =>
-      _cachedSummaries ??= _computeSummaries(_kEmployees, _rows);
+      _cachedSummaries ??= _computeSummaries(_employees, _rows);
 
   /// Called from cell onChanged. If the value ends with 'asdf', strips those
   /// 4 chars, updates [ctrl] and [dataMap][key], then adds a new row.
@@ -486,6 +600,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   /// Schedule an analysis refresh 600 ms after the last keystroke.
   void _scheduleAnalysisUpdate() {
     _analysisDebounce?.cancel();
+    _scheduleSave();
     _analysisDebounce = Timer(const Duration(milliseconds: 600), () {
       if (mounted) {
         setState(() { _cachedSummaries = null; });
@@ -505,6 +620,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       debugPrint('[Perf] build #$_buildCount  Δt=${gap}ms since last build');
     }
     _lastBuildTime = now;
+
+    if (_loadingData) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -597,7 +716,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     const colWidth  = 160.0;
     const headerH   = 40.0;
     const rowH      = 36.0;
-    final totalEmpW = _kEmployees.length * colWidth;
+    final totalEmpW = _employees.length * colWidth;
 
     return Column(
       children: [
@@ -632,7 +751,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   child: SizedBox(
                     width: totalEmpW,
                     child: Row(
-                      children: _kEmployees.map((e) => SizedBox(
+                      children: _employees.map((e) => SizedBox(
                         width: colWidth,
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -704,7 +823,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     itemExtent: rowH,
                   itemBuilder: (_, i) {
                     final row = _rows[i];
-                    final isHoliday = _kEmployees.every(
+                    final isHoliday = _employees.every(
                         (e) => _isHoliday(row[e] ?? ''));
                     return GestureDetector(
                       onDoubleTap: i == _rows.length - 1
@@ -788,7 +907,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                           return SizedBox(
                             height: rowH,
                             child: Row(
-                              children: _kEmployees.map((emp) {
+                              children: _employees.map((emp) {
                                 final raw    = row[emp] ?? '';
                                 final isLeave = _isLeave(raw);
                                 final parsed  = _parseHours(raw);

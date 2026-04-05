@@ -1,13 +1,12 @@
 import 'package:flutter/material.dart';
-import '../../core/auth/user_role.dart';
+import '../../core/config/app_colors.dart';
+import '../../core/models/user.dart';
 
 class CelumeAppBar extends StatelessWidget implements PreferredSizeWidget {
-  final UserRole role;
+  final User user;
   final VoidCallback? onMenuPressed;
 
-  const CelumeAppBar({super.key, required this.role, this.onMenuPressed});
-
-  static const _primaryColor = Color(0xFF1A1A2E);
+  const CelumeAppBar({super.key, required this.user, this.onMenuPressed});
 
   @override
   Size get preferredSize => const Size.fromHeight(56);
@@ -17,7 +16,7 @@ class CelumeAppBar extends StatelessWidget implements PreferredSizeWidget {
     final isSmallScreen = MediaQuery.of(context).size.width < 800;
 
     return AppBar(
-      backgroundColor: _primaryColor,
+      backgroundColor: AppColors.primary,
       leading: isSmallScreen
           ? IconButton(
               icon: const Icon(Icons.menu, color: Colors.white),
@@ -26,7 +25,7 @@ class CelumeAppBar extends StatelessWidget implements PreferredSizeWidget {
           : null,
       automaticallyImplyLeading: false,
       title: Text(
-        'Celume Operations — ${role.displayName}',
+        'Celume Operations — ${user.name}',
         style: const TextStyle(color: Colors.white, fontSize: 16),
       ),
     );

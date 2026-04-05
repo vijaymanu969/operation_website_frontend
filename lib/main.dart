@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'core/api/api_client.dart';
 import 'core/auth/auth_service.dart';
 import 'core/auth/auth_bloc.dart';
 import 'core/router/app_router.dart';
@@ -17,6 +18,7 @@ class CelumeOpsApp extends StatefulWidget {
 
 class _CelumeOpsAppState extends State<CelumeOpsApp> {
   late final AuthService _authService;
+  late final ApiClient _apiClient;
   late final AuthBloc _authBloc;
   late final AppRouter _appRouter;
 
@@ -24,7 +26,8 @@ class _CelumeOpsAppState extends State<CelumeOpsApp> {
   void initState() {
     super.initState();
     _authService = AuthService();
-    _authBloc = AuthBloc(authService: _authService);
+    _apiClient = ApiClient(authService: _authService);
+    _authBloc = AuthBloc(authService: _authService, apiClient: _apiClient);
     _appRouter = AppRouter(authBloc: _authBloc);
     _authBloc.add(AuthCheckRequested());
   }
@@ -37,8 +40,11 @@ class _CelumeOpsAppState extends State<CelumeOpsApp> {
 
   @override
   Widget build(BuildContext context) {
-    return BlocProvider.value(
-      value: _authBloc,
+    return MultiBlocProvider(
+      providers: [
+        BlocProvider.value(value: _authBloc),
+        RepositoryProvider.value(value: _apiClient),
+      ],
       child: MaterialApp.router(
         title: 'Celume Ops',
         debugShowCheckedModeBanner: false,

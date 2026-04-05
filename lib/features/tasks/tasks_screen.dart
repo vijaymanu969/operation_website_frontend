@@ -1,7 +1,9 @@
 import 'dart:ui' show ImageFilter;
 import 'dart:math' show min;
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:appflowy_board/appflowy_board.dart';
+import '../../core/api/api_client.dart';
 import '../../shared/widgets/select_option_field.dart';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
@@ -43,30 +45,140 @@ extension PriorityX on Priority {
 // ─── Model ────────────────────────────────────────────────────────────────────
 
 class TaskItem extends AppFlowyGroupItem {
+  String?  backendId;     // UUID from backend
   String   title;
   String   description;
   String   assignee;
+  String?  personId;      // UUID of assignee
+  String?  reviewerId;
+  String?  reviewerName;
   Priority priority;
-  DateTime? date;    // start / due date
-  DateTime? endDate; // optional range end date
+  String   status;        // not_completed, reviewer, completed
+  DateTime? date;         // start / due date
+  DateTime? endDate;      // optional range end date
   String   type;
-  List<String> comments;
+  List<String>  typeIds;
+  List<Map<String, dynamic>> types; // [{id, name, color}]
+  List<Map<String, dynamic>> commentsList; // full comment objects from API
   bool     isDone;
+  String?  columnGroup;
+  int      sortOrder;
+  // Pause/drift fields
+  bool     isPaused;
+  int?     plannedDays;
+  int?     pausedDays;
+  int?     actualDays;
+  int?     drift;
+  String?  health;
 
   TaskItem({
+    this.backendId,
     required this.title,
     this.description = '',
     this.assignee    = '',
+    this.personId,
+    this.reviewerId,
+    this.reviewerName,
     this.priority    = Priority.medium,
+    this.status      = 'not_completed',
     this.date,
     this.endDate,
     this.type        = 'Task',
-    List<String>? comments,
+    List<String>? typeIds,
+    List<Map<String, dynamic>>? types,
+    List<Map<String, dynamic>>? commentsList,
     this.isDone      = false,
-  }) : comments = comments ?? [];
+    this.columnGroup,
+    this.sortOrder   = 0,
+    this.isPaused    = false,
+    this.plannedDays,
+    this.pausedDays,
+    this.actualDays,
+    this.drift,
+    this.health,
+  }) : typeIds = typeIds ?? [],
+       types = types ?? [],
+       commentsList = commentsList ?? [];
+
+  // For backward compat with comments displayed as strings
+  List<String> get comments => commentsList.map((c) => c['text'] as String? ?? '').toList();
 
   @override
-  String get id => title;
+  String get id => backendId ?? title;
+
+  factory TaskItem.fromJson(Map<String, dynamic> json) {
+    final typesList = (json['types'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final commentsRaw = (json['comments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final status = json['status'] as String? ?? 'not_completed';
+
+    // Handle both single person_id and multi-person assignees array
+    final assignees = (json['assignees'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final reviewers = (json['reviewers'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final assigneeName = assignees.isNotEmpty
+        ? assignees.map((a) => a['name'] as String).join(', ')
+        : json['person_name'] as String? ?? '';
+    final assigneeId = assignees.isNotEmpty
+        ? assignees.first['id'] as String?
+        : json['person_id'] as String?;
+    final reviewerName = reviewers.isNotEmpty
+        ? reviewers.first['name'] as String?
+        : json['reviewer_name'] as String?;
+    final reviewerId = reviewers.isNotEmpty
+        ? reviewers.first['id'] as String?
+        : json['reviewer_id'] as String?;
+
+    return TaskItem(
+      backendId:    json['id'] as String?,
+      title:        json['title'] as String? ?? '',
+      description:  json['description'] as String? ?? '',
+      assignee:     assigneeName,
+      personId:     assigneeId,
+      reviewerId:   reviewerId,
+      reviewerName: reviewerName,
+      priority:     _parsePriority(json['priority'] as String?),
+      status:       status,
+      date:         _parseDate(json['date']),
+      endDate:      _parseDate(json['end_date']),
+      type:         typesList.isNotEmpty ? typesList.first['name'] as String : '',
+      typeIds:      typesList.map((t) => t['id'] as String).toList(),
+      types:        typesList,
+      commentsList: commentsRaw,
+      isDone:       status == 'completed',
+      columnGroup:  json['column_group'] as String?,
+      sortOrder:    json['sort_order'] as int? ?? 0,
+      isPaused:     json['is_paused'] as bool? ?? false,
+      plannedDays:  json['planned_days'] as int?,
+      pausedDays:   json['paused_days'] as int?,
+      actualDays:   json['actual_days'] as int?,
+      drift:        json['drift'] as int?,
+      health:       json['health'] as String?,
+    );
+  }
+
+  static Priority _parsePriority(String? p) => switch (p) {
+    'high'   => Priority.high,
+    'low'    => Priority.low,
+    _        => Priority.medium,
+  };
+
+  static DateTime? _parseDate(dynamic d) {
+    if (d == null) return null;
+    return DateTime.tryParse(d.toString());
+  }
+
+  /// Map column_group from backend to board group ID
+  static String columnToGroup(String? col) => switch (col) {
+    'in_progress' => 'in_progress',
+    'done'        => 'done',
+    _             => 'todo',
+  };
+
+  /// Map board group ID back to backend column_group
+  static String groupToColumn(String groupId) => switch (groupId) {
+    'in_progress' => 'in_progress',
+    'done'        => 'done',
+    _             => 'todo',
+  };
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -81,6 +193,10 @@ class _TasksScreenState extends State<TasksScreen> {
   late final AppFlowyBoardController       _boardCtrl;
   late final AppFlowyBoardScrollController _scrollCtrl;
   TaskItem? _selectedTask;
+  bool _loadingTasks = true;
+
+  // Task types from backend
+  List<SelectOption> _taskTypeOpts = [];
 
   // ── Filters ──────────────────────────────────────────────────────────────
   String?   _filterPerson;
@@ -106,6 +222,8 @@ class _TasksScreenState extends State<TasksScreen> {
       _filterPerson != null || _filterType != null ||
       _filterPriority != null || _filterDone != null;
 
+  ApiClient get _api => context.read<ApiClient>();
+
   @override
   void initState() {
     super.initState();
@@ -113,91 +231,107 @@ class _TasksScreenState extends State<TasksScreen> {
     _boardCtrl  = AppFlowyBoardController(
       onMoveGroup:            (_, _, _, _) {},
       onMoveGroupItem:        (_, _, _)    {},
-      onMoveGroupItemToGroup: (_, _, _, _) {},
+      onMoveGroupItemToGroup: (fromGroupId, fromIndex, toGroupId, toIndex) {
+        _onTaskMovedToGroup(fromGroupId, fromIndex, toGroupId, toIndex);
+      },
     );
-    _initBoard();
+    _loadTasks();
+    _loadTaskTypes();
   }
 
-  void _initBoard() {
-    _boardCtrl.addGroup(AppFlowyGroupData(
-      id: 'todo', name: 'To Do',
-      items: <AppFlowyGroupItem>[
-        TaskItem(
-          title:       'Design landing page',
-          description: 'Create wireframes and high-fidelity mockups for the new marketing landing page',
-          assignee:    'Alice',
-          priority:    Priority.high,
-          type:        'Design',
-          date:        DateTime.now().add(const Duration(days: 3)),
-        ),
-        TaskItem(
-          title:       'Set up CI/CD pipeline',
-          description: 'Configure GitHub Actions for automated testing and deployment',
-          assignee:    'Bob',
-          priority:    Priority.medium,
-          type:        'DevOps',
-          date:        DateTime.now().add(const Duration(days: 7)),
-        ),
-        TaskItem(
-          title:       'Write API documentation',
-          description: 'Document all REST endpoints with examples and error codes',
-          assignee:    'Charlie',
-          priority:    Priority.low,
-          type:        'Docs',
-          date:        DateTime.now().add(const Duration(days: 5)),
-        ),
-      ],
-    ));
+  Future<void> _loadTaskTypes() async {
+    try {
+      final res = await _api.getTaskTypes();
+      final types = (res.data as List).cast<Map<String, dynamic>>();
+      setState(() {
+        _taskTypeOpts = types.map((t) => SelectOption(
+          id:    t['id'] as String,
+          name:  t['name'] as String,
+          color: _colorFromString(t['color'] as String? ?? 'gray'),
+        )).toList();
+      });
+    } catch (_) {}
+  }
 
-    _boardCtrl.addGroup(AppFlowyGroupData(
-      id: 'in_progress', name: 'In Progress',
-      items: <AppFlowyGroupItem>[
-        TaskItem(
-          title:       'Build auth flow',
-          description: 'Implement GoTrue login, logout and session refresh',
-          assignee:    'Bob',
-          priority:    Priority.high,
-          type:        'Feature',
-          date:        DateTime.now().add(const Duration(days: 2)),
-          comments:    ['Blocked on GoTrue config', 'Unblocked — proceeding'],
-        ),
-        TaskItem(
-          title:       'Dashboard layout',
-          description: 'Role-based dashboard screens for CEO, directors and staff',
-          assignee:    'Alice',
-          priority:    Priority.medium,
-          type:        'Feature',
-          date:        DateTime.now().add(const Duration(days: 1)),
-          comments:    ['Draft ready for review'],
-        ),
-      ],
-    ));
+  static SelectOptionColor _colorFromString(String c) => switch (c) {
+    'purple' => SelectOptionColor.purple,
+    'pink'   => SelectOptionColor.pink,
+    'blue'   => SelectOptionColor.blue,
+    'green'  => SelectOptionColor.green,
+    'orange' => SelectOptionColor.orange,
+    'red'    => SelectOptionColor.pink,
+    'yellow' => SelectOptionColor.orange,
+    _        => SelectOptionColor.gray,
+  };
 
-    _boardCtrl.addGroup(AppFlowyGroupData(
-      id: 'done', name: 'Done',
-      items: <AppFlowyGroupItem>[
-        TaskItem(
-          title:       'Project scaffolding',
-          description: 'Flutter web project initialized with router and theme',
-          assignee:    'Bob',
-          priority:    Priority.low,
-          type:        'Setup',
-          isDone:      true,
-        ),
-        TaskItem(
-          title:       'Vercel deployment config',
-          description: 'vercel.json configured, preview deployments verified',
-          assignee:    'Charlie',
-          priority:    Priority.low,
-          type:        'DevOps',
-          isDone:      true,
-        ),
-      ],
-    ));
+  Future<void> _loadTasks() async {
+    setState(() => _loadingTasks = true);
+    try {
+      final res = await _api.getTasks();
+      final tasks = (res.data as List)
+          .map((j) => TaskItem.fromJson(j as Map<String, dynamic>))
+          .toList();
 
-    // Collect all tasks for filter options
-    for (final g in _boardCtrl.groupDatas) {
-      _allTasks.addAll(g.items.cast<TaskItem>());
+      // Group tasks by column
+      final todoItems = <AppFlowyGroupItem>[];
+      final inProgressItems = <AppFlowyGroupItem>[];
+      final doneItems = <AppFlowyGroupItem>[];
+
+      for (final task in tasks) {
+        final group = TaskItem.columnToGroup(task.columnGroup);
+        switch (group) {
+          case 'in_progress': inProgressItems.add(task);
+          case 'done':        doneItems.add(task);
+          default:            todoItems.add(task);
+        }
+      }
+
+      // Sort by sort_order within each group
+      todoItems.sort((a, b) => (a as TaskItem).sortOrder.compareTo((b as TaskItem).sortOrder));
+      inProgressItems.sort((a, b) => (a as TaskItem).sortOrder.compareTo((b as TaskItem).sortOrder));
+      doneItems.sort((a, b) => (a as TaskItem).sortOrder.compareTo((b as TaskItem).sortOrder));
+
+      // Clear and rebuild board
+      for (final g in _boardCtrl.groupDatas.toList()) {
+        _boardCtrl.removeGroup(g.id);
+      }
+
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo', name: 'To Do', items: todoItems));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'in_progress', name: 'In Progress', items: inProgressItems));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'done', name: 'Done', items: doneItems));
+
+      _allTasks.clear();
+      _allTasks.addAll(tasks);
+    } catch (_) {
+      // If API fails, show empty board
+      for (final g in _boardCtrl.groupDatas.toList()) {
+        _boardCtrl.removeGroup(g.id);
+      }
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo', name: 'To Do', items: []));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'in_progress', name: 'In Progress', items: []));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'done', name: 'Done', items: []));
+    }
+    if (mounted) setState(() => _loadingTasks = false);
+  }
+
+  /// Called when a card is dragged to a different column
+  void _onTaskMovedToGroup(String fromGroupId, int fromIndex, String toGroupId, int toIndex) {
+    // Build reorder payload for all items in the target group
+    final group = _boardCtrl.getGroupController(toGroupId);
+    if (group == null) return;
+    final reorderPayload = <Map<String, dynamic>>[];
+    for (var i = 0; i < group.items.length; i++) {
+      final item = group.items[i] as TaskItem;
+      if (item.backendId != null) {
+        reorderPayload.add({
+          'id': item.backendId,
+          'column_group': TaskItem.groupToColumn(toGroupId),
+          'sort_order': i,
+        });
+      }
+    }
+    if (reorderPayload.isNotEmpty) {
+      _api.reorderTasks(reorderPayload);
     }
   }
 
@@ -242,7 +376,9 @@ class _TasksScreenState extends State<TasksScreen> {
         ),
         const SizedBox(height: 4),
         Expanded(
-          child: Row(
+          child: _loadingTasks
+              ? const Center(child: CircularProgressIndicator())
+              : Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // ── Kanban board ────────────────────────────────────────────────
@@ -340,9 +476,10 @@ class _TasksScreenState extends State<TasksScreen> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: _TaskDetailPanel(
-                    item:      item,
-                    onClose:   () => Navigator.of(ctx).pop(),
-                    onChanged: () => setState(() {}),
+                    item:        item,
+                    onClose:     () => Navigator.of(ctx).pop(),
+                    onChanged:   () => setState(() {}),
+                    typeOptions: _taskTypeOpts,
                   ),
                 ),
               ),
@@ -367,13 +504,7 @@ class _TasksScreenState extends State<TasksScreen> {
     bool      endDateEnabled  = false;
     bool      showCalendar    = false;
 
-    final dialogTypeOpts = <SelectOption>[
-      SelectOption(id: '1', name: 'prompt',         color: SelectOptionColor.purple),
-      SelectOption(id: '2', name: 'whatsapp agent', color: SelectOptionColor.pink),
-      SelectOption(id: '3', name: 'frontend',       color: SelectOptionColor.blue),
-      SelectOption(id: '4', name: 'Backend',        color: SelectOptionColor.green),
-      SelectOption(id: '5', name: 'Agent',          color: SelectOptionColor.orange),
-    ];
+    final dialogTypeOpts = List<SelectOption>.from(_taskTypeOpts);
     List<String> selectedTypeIds = [];
     const border   = OutlineInputBorder(
       borderRadius: BorderRadius.all(Radius.circular(8)),
@@ -621,26 +752,33 @@ class _TasksScreenState extends State<TasksScreen> {
           ),
         ),
       ),
-    ).then((_) {
+    ).then((_) async {
       // Fires when dialog is dismissed (barrier tap, back button, etc.)
       if (!mounted) return;
       final title = titleCtrl.text.trim();
       if (title.isNotEmpty) {
-        // Add the card to the board locally.
-        // TODO: replace with backend API call once endpoints are provided.
-        _boardCtrl
-            .getGroupController(selectedGroup)
-            ?.add(TaskItem(
-              title:       title,
-              description: descCtrl.text.trim(),
-              assignee:    assigneeCtrl.text.trim(),
-              priority:    selectedPriority,
-              type:        selectedType,
-              date:        selectedDate,
-              endDate:     selectedEndDate,
-            ));
+        try {
+          final data = <String, dynamic>{
+            'title':        title,
+            'description':  descCtrl.text.trim(),
+            'priority':     selectedPriority.name,
+            'column_group': TaskItem.groupToColumn(selectedGroup),
+          };
+          if (selectedDate != null) {
+            data['date'] = selectedDate!.toIso8601String().split('T').first;
+          }
+          if (selectedEndDate != null) {
+            data['end_date'] = selectedEndDate!.toIso8601String().split('T').first;
+          }
+          if (selectedTypeIds.isNotEmpty) {
+            data['type_ids'] = selectedTypeIds;
+          }
+          await _api.createTask(data);
+          await _loadTasks();
+        } catch (_) {
+          // Silently fail — task not created
+        }
       }
-      // Dispose text controllers created for this dialog session.
       titleCtrl.dispose();
       descCtrl.dispose();
       assigneeCtrl.dispose();
@@ -1161,7 +1299,8 @@ class _PanelRow extends StatelessWidget {
 
 class _CommentBubble extends StatelessWidget {
   final String text;
-  const _CommentBubble({required this.text});
+  final String? author;
+  const _CommentBubble({required this.text, this.author});
 
   @override
   Widget build(BuildContext context) {
@@ -1173,8 +1312,20 @@ class _CommentBubble extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
         border:       Border.all(color: _kBorder),
       ),
-      child: Text(text,
-          style: const TextStyle(fontSize: 12, color: _kPrimary, height: 1.4)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (author != null && author!.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: Text(author!,
+                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: _kMuted)),
+            ),
+          Text(text,
+              style: const TextStyle(fontSize: 12, color: _kPrimary, height: 1.4)),
+        ],
+      ),
     );
   }
 }
@@ -1185,12 +1336,14 @@ class _TaskDetailPanel extends StatefulWidget {
   final TaskItem     item;
   final VoidCallback onClose;
   final VoidCallback onChanged;
+  final List<SelectOption> typeOptions;
 
   const _TaskDetailPanel({
     super.key,
     required this.item,
     required this.onClose,
     required this.onChanged,
+    this.typeOptions = const [],
   });
 
   @override
@@ -1205,13 +1358,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   OverlayEntry? _dateOverlay;
   bool _endDateEnabled    = false;
 
-  final List<SelectOption> _typeOpts = [
-    SelectOption(id: '1', name: 'prompt',         color: SelectOptionColor.purple),
-    SelectOption(id: '2', name: 'whatsapp agent', color: SelectOptionColor.pink),
-    SelectOption(id: '3', name: 'frontend',       color: SelectOptionColor.blue),
-    SelectOption(id: '4', name: 'Backend',        color: SelectOptionColor.green),
-    SelectOption(id: '5', name: 'Agent',          color: SelectOptionColor.orange),
-  ];
+  late final List<SelectOption> _typeOpts = List<SelectOption>.from(widget.typeOptions);
 
   @override
   void dispose() {
@@ -1523,11 +1670,14 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   ),
                 ]),
                 const SizedBox(height: 10),
-                if (item.comments.isEmpty)
+                if (item.commentsList.isEmpty)
                   const Text('No comments yet',
                       style: TextStyle(fontSize: 12, color: _kMuted))
                 else
-                  ...item.comments.map((c) => _CommentBubble(text: c)),
+                  ...item.commentsList.map((c) => _CommentBubble(
+                    text: c['text'] as String? ?? '',
+                    author: c['user_name'] as String?,
+                  )),
                 const SizedBox(height: 10),
                 // Add comment
                 Row(children: [
@@ -1576,13 +1726,32 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     );
   }
 
-  void _addComment() {
+  void _addComment() async {
     final text = _commentCtrl.text.trim();
     if (text.isEmpty) return;
-    setState(() {
-      widget.item.comments.add(text);
-      _commentCtrl.clear();
-    });
+    final backendId = widget.item.backendId;
+    if (backendId != null) {
+      try {
+        final api = context.read<ApiClient>();
+        final res = await api.addTaskComment(backendId, text);
+        final comment = res.data as Map<String, dynamic>;
+        setState(() {
+          widget.item.commentsList.add(comment);
+          _commentCtrl.clear();
+        });
+      } catch (_) {
+        // Fallback — add locally
+        setState(() {
+          widget.item.commentsList.add({'text': text, 'user_name': 'You'});
+          _commentCtrl.clear();
+        });
+      }
+    } else {
+      setState(() {
+        widget.item.commentsList.add({'text': text});
+        _commentCtrl.clear();
+      });
+    }
     widget.onChanged();
   }
 }

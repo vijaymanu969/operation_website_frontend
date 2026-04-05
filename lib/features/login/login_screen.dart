@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../core/auth/auth_bloc.dart';
-import '../../core/auth/user_role.dart';
+import '../../core/config/app_colors.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -14,10 +14,6 @@ class _LoginScreenState extends State<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
-  UserRole _selectedRole = UserRole.ceo;
-
-  static const _primaryColor = Color(0xFF1A1A2E);
-  static const _accentColor = Color(0xFFE94560);
 
   @override
   void dispose() {
@@ -32,7 +28,6 @@ class _LoginScreenState extends State<LoginScreen> {
             AuthLoginRequested(
               email: _emailController.text.trim(),
               password: _passwordController.text,
-              role: _selectedRole,
             ),
           );
     }
@@ -41,7 +36,7 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: _primaryColor,
+      backgroundColor: AppColors.primary,
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(32),
@@ -64,10 +59,10 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
+                  const Text(
                     'CELUME OPS',
                     style: TextStyle(
-                      color: _primaryColor,
+                      color: AppColors.primary,
                       fontSize: 28,
                       fontWeight: FontWeight.bold,
                       letterSpacing: 3,
@@ -92,7 +87,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: _accentColor, width: 2),
+                        borderSide: const BorderSide(color: AppColors.accent, width: 2),
                       ),
                     ),
                     keyboardType: TextInputType.emailAddress,
@@ -115,7 +110,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: _accentColor, width: 2),
+                        borderSide: const BorderSide(color: AppColors.accent, width: 2),
                       ),
                     ),
                     obscureText: true,
@@ -127,30 +122,6 @@ class _LoginScreenState extends State<LoginScreen> {
                     },
                     onFieldSubmitted: (_) => _onSubmit(),
                   ),
-                  const SizedBox(height: 20),
-                  DropdownButtonFormField<UserRole>(
-                    value: _selectedRole,
-                    decoration: InputDecoration(
-                      labelText: 'Login as (dev mode)',
-                      prefixIcon: const Icon(Icons.person_outline),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: _accentColor, width: 2),
-                      ),
-                    ),
-                    items: UserRole.values.map((role) {
-                      return DropdownMenuItem(
-                        value: role,
-                        child: Text(role.displayName),
-                      );
-                    }).toList(),
-                    onChanged: (role) {
-                      if (role != null) setState(() => _selectedRole = role);
-                    },
-                  ),
                   const SizedBox(height: 32),
                   BlocConsumer<AuthBloc, AuthState>(
                     listener: (context, state) {
@@ -158,7 +129,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
                             content: Text(state.message),
-                            backgroundColor: _accentColor,
+                            backgroundColor: AppColors.accent,
                           ),
                         );
                       }
@@ -171,7 +142,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: ElevatedButton(
                           onPressed: isLoading ? null : _onSubmit,
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: _accentColor,
+                            backgroundColor: AppColors.accent,
                             foregroundColor: Colors.white,
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(12),

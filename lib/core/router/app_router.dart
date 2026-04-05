@@ -1,19 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import '../auth/auth_bloc.dart';
 import '../auth/user_role.dart';
+import '../config/app_config.dart';
 import '../../features/login/login_screen.dart';
-import '../../features/dashboard/ceo_dashboard.dart';
-import '../../features/dashboard/tech_director_dashboard.dart';
-import '../../features/dashboard/ops_director_dashboard.dart';
-import '../../features/dashboard/sales_director_dashboard.dart';
-import '../../features/dashboard/staff_dashboard.dart';
+import '../../features/dashboard/dashboard_screen.dart';
 import '../../features/tasks/tasks_screen.dart';
 import '../../features/attendance/attendance_screen.dart';
 import '../../features/chat/chat_screen.dart';
 import '../../features/analytics/analytics_screen.dart';
 import '../../features/clients/clients_screen.dart';
+import '../../features/users/user_management_screen.dart';
 import '../../shared/widgets/app_shell.dart';
 
 class AppRouter {
@@ -34,7 +31,24 @@ class AppRouter {
       }
 
       if (isAuthenticated && isOnLogin) {
-        return (authState as AuthAuthenticated).role.routePath;
+        return '/dashboard';
+      }
+
+      // Page access guard
+      if (isAuthenticated) {
+        final user = authState.user;
+        final location = state.matchedLocation;
+
+        // Map routes to page names
+        final pageForRoute = _pageNameForRoute(location);
+        if (pageForRoute != null && !user.hasPageAccess(pageForRoute)) {
+          return '/dashboard';
+        }
+
+        // /users is super_admin only
+        if (location == '/users' && user.role != UserRole.superAdmin) {
+          return '/dashboard';
+        }
       }
 
       return null;
@@ -48,24 +62,8 @@ class AppRouter {
         builder: (context, state, child) => AppShell(child: child),
         routes: [
           GoRoute(
-            path: '/dashboard/ceo',
-            builder: (context, state) => const CeoDashboard(),
-          ),
-          GoRoute(
-            path: '/dashboard/tech',
-            builder: (context, state) => const TechDirectorDashboard(),
-          ),
-          GoRoute(
-            path: '/dashboard/ops',
-            builder: (context, state) => const OpsDirectorDashboard(),
-          ),
-          GoRoute(
-            path: '/dashboard/sales',
-            builder: (context, state) => const SalesDirectorDashboard(),
-          ),
-          GoRoute(
-            path: '/dashboard/staff',
-            builder: (context, state) => const StaffDashboard(),
+            path: '/dashboard',
+            builder: (context, state) => const DashboardScreen(),
           ),
           GoRoute(
             path: '/tasks',
@@ -87,10 +85,33 @@ class AppRouter {
             path: '/clients',
             builder: (context, state) => const ClientsScreen(),
           ),
+          GoRoute(
+            path: '/users',
+            builder: (context, state) => const UserManagementScreen(),
+          ),
         ],
       ),
     ],
   );
+
+  /// Maps a route path to its page_access name.
+  /// Returns null for routes that don't need page access (dashboard, users).
+  static String? _pageNameForRoute(String route) {
+    switch (route) {
+      case '/tasks':
+        return AppConfig.pageTasks;
+      case '/attendance':
+        return AppConfig.pageAttendance;
+      case '/chat':
+        return AppConfig.pageChat;
+      case '/analytics':
+        return AppConfig.pageAnalytics;
+      case '/clients':
+        return AppConfig.pageClients;
+      default:
+        return null;
+    }
+  }
 }
 
 class _GoRouterAuthNotifier extends ChangeNotifier {

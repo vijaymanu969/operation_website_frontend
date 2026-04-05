@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../core/auth/auth_bloc.dart';
-import '../../core/auth/user_role.dart';
+import '../../core/config/app_colors.dart';
 import 'celume_sidebar.dart';
 import 'celume_app_bar.dart';
 
@@ -13,17 +13,21 @@ class AppShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final authState = context.watch<AuthBloc>().state;
-    final role = authState is AuthAuthenticated ? authState.role : UserRole.staff;
+    if (authState is! AuthAuthenticated) {
+      return const SizedBox.shrink();
+    }
+
+    final user = authState.user;
     final isSmallScreen = MediaQuery.of(context).size.width < 800;
 
     return Scaffold(
-      appBar: CelumeAppBar(role: role),
+      appBar: CelumeAppBar(user: user),
       drawer: isSmallScreen
-          ? Drawer(child: Material(color: const Color(0xFF1A1A2E), child: CelumeSidebar(role: role)))
+          ? Drawer(child: Material(color: AppColors.sidebarBg, child: CelumeSidebar(user: user)))
           : null,
       body: Row(
         children: [
-          if (!isSmallScreen) CelumeSidebar(role: role),
+          if (!isSmallScreen) CelumeSidebar(user: user),
           Expanded(child: child),
         ],
       ),

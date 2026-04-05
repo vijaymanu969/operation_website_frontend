@@ -3,14 +3,14 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/auth/auth_bloc.dart';
 import '../../core/auth/user_role.dart';
+import '../../core/config/app_colors.dart';
+import '../../core/config/app_config.dart';
+import '../../core/models/user.dart';
 
 class CelumeSidebar extends StatelessWidget {
-  final UserRole role;
+  final User user;
 
-  const CelumeSidebar({super.key, required this.role});
-
-  static const _primaryColor = Color(0xFF1A1A2E);
-  static const _accentColor = Color(0xFFE94560);
+  const CelumeSidebar({super.key, required this.user});
 
   @override
   Widget build(BuildContext context) {
@@ -22,22 +22,24 @@ class CelumeSidebar extends StatelessWidget {
 
     return Container(
       width: 260,
-      color: _primaryColor,
+      color: AppColors.sidebarBg,
       child: _buildDrawerContent(context),
     );
   }
 
   Widget _buildDrawerContent(BuildContext context) {
+    final currentPath = GoRouterState.of(context).matchedLocation;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // ── Header ────────────────────────────────────────────────────────────
+        // ── Header ──────────────────────────────────────────────────────
         const SizedBox(height: 40),
         Center(
           child: Text(
             'CELUME OPS',
             style: TextStyle(
-              color: _accentColor,
+              color: AppColors.accent,
               fontSize: 22,
               fontWeight: FontWeight.bold,
               letterSpacing: 2,
@@ -49,92 +51,146 @@ class CelumeSidebar extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             decoration: BoxDecoration(
-              color: _accentColor.withValues(alpha: 0.15),
+              color: AppColors.accent.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
-              role.displayName,
+              user.role.displayName,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ),
         ),
         const SizedBox(height: 32),
 
-        // ── Nav items (scrollable if height is tight) ──────────────────────
+        // ── Nav items ───────────────────────────────────────────────────
         Expanded(
           child: SingleChildScrollView(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Dashboard — always visible
                 _NavItem(
-                  icon:  Icons.dashboard,
+                  icon: Icons.dashboard,
                   label: 'Dashboard',
-                  onTap: () => context.go(role.routePath),
+                  isActive: currentPath == '/dashboard',
+                  onTap: () => _navigate(context, '/dashboard'),
                 ),
-                _NavItem(
-                  icon:  Icons.task_alt,
-                  label: 'Tasks',
-                  onTap: () => context.go('/tasks'),
-                ),
-                _NavItem(
-                  icon:  Icons.access_time,
-                  label: 'Attendance',
-                  onTap: () => context.go('/attendance'),
-                ),
-                _NavItem(
-                  icon:  Icons.chat_bubble_outline,
-                  label: 'Chat',
-                  onTap: () => context.go('/chat'),
-                ),
-                _NavItem(
-                  icon:  Icons.bar_chart,
-                  label: 'Analytics',
-                  onTap: () => context.go('/analytics'),
-                ),
-                _NavItem(
-                  icon:  Icons.people_outline_rounded,
-                  label: 'Clients',
-                  onTap: () => context.go('/clients'),
-                ),
+
+                // Tasks
+                if (user.hasPageAccess(AppConfig.pageTasks))
+                  _NavItem(
+                    icon: Icons.task_alt,
+                    label: 'Tasks',
+                    isActive: currentPath == '/tasks',
+                    onTap: () => _navigate(context, '/tasks'),
+                  ),
+
+                // Attendance
+                if (user.hasPageAccess(AppConfig.pageAttendance))
+                  _NavItem(
+                    icon: Icons.access_time,
+                    label: 'Attendance',
+                    isActive: currentPath == '/attendance',
+                    onTap: () => _navigate(context, '/attendance'),
+                  ),
+
+                // Chat
+                if (user.hasPageAccess(AppConfig.pageChat))
+                  _NavItem(
+                    icon: Icons.chat_bubble_outline,
+                    label: 'Chat',
+                    isActive: currentPath == '/chat',
+                    onTap: () => _navigate(context, '/chat'),
+                  ),
+
+                // Analytics
+                if (user.hasPageAccess(AppConfig.pageAnalytics))
+                  _NavItem(
+                    icon: Icons.bar_chart,
+                    label: 'Analytics',
+                    isActive: currentPath == '/analytics',
+                    onTap: () => _navigate(context, '/analytics'),
+                  ),
+
+                // Clients
+                if (user.hasPageAccess(AppConfig.pageClients))
+                  _NavItem(
+                    icon: Icons.people_outline_rounded,
+                    label: 'Clients',
+                    isActive: currentPath == '/clients',
+                    onTap: () => _navigate(context, '/clients'),
+                  ),
+
+                // User Management — super_admin only
+                if (user.role == UserRole.superAdmin)
+                  _NavItem(
+                    icon: Icons.admin_panel_settings,
+                    label: 'User Management',
+                    isActive: currentPath == '/users',
+                    onTap: () => _navigate(context, '/users'),
+                  ),
               ],
             ),
           ),
         ),
 
-        // ── Logout — always pinned at bottom ──────────────────────────────
+        // ── Logout ──────────────────────────────────────────────────────
         _NavItem(
-          icon:  Icons.logout,
+          icon: Icons.logout,
           label: 'Logout',
+          isActive: false,
           onTap: () => context.read<AuthBloc>().add(AuthLogoutRequested()),
         ),
         const SizedBox(height: 24),
       ],
     );
   }
+
+  void _navigate(BuildContext context, String path) {
+    // Close drawer on small screens
+    if (MediaQuery.of(context).size.width < 800) {
+      Navigator.of(context).pop();
+    }
+    context.go(path);
+  }
 }
 
 class _NavItem extends StatelessWidget {
   final IconData icon;
   final String label;
+  final bool isActive;
   final VoidCallback onTap;
 
   const _NavItem({
     required this.icon,
     required this.label,
+    required this.isActive,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
-      leading: Icon(icon, color: Colors.white70, size: 20),
-      title: Text(
-        label,
-        style: const TextStyle(color: Colors.white70, fontSize: 14),
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      decoration: BoxDecoration(
+        color: isActive ? Colors.white.withValues(alpha: 0.1) : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
       ),
-      onTap: onTap,
-      hoverColor: Colors.white10,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+      child: ListTile(
+        leading: Icon(icon, color: isActive ? AppColors.accent : AppColors.navItemText, size: 20),
+        title: Text(
+          label,
+          style: TextStyle(
+            color: isActive ? Colors.white : AppColors.navItemText,
+            fontSize: 14,
+            fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+          ),
+        ),
+        onTap: onTap,
+        hoverColor: AppColors.navItemHover,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+        dense: true,
+      ),
     );
   }
 }

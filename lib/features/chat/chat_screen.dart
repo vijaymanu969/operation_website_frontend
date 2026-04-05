@@ -1,6 +1,9 @@
 import 'dart:ui' show ImageFilter;
 import 'dart:math' show min;
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../core/api/api_client.dart';
+import '../../core/auth/auth_bloc.dart';
 
 // ── Design tokens (match the rest of the app) ──────────────────────────────────
 const _kAccent  = Color(0xFFE94560);
@@ -81,6 +84,7 @@ class _ChatTask {
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
 
+// ignore: unused_element
 const _kContacts = <_Contact>[
   _Contact(
     id: '1', name: 'Kaiya George',    role: 'Project Manager',
@@ -121,6 +125,7 @@ const _kContacts = <_Contact>[
 ];
 
 // Messages per contact id — mutable so task status can change in-place.
+// ignore: unused_element
 final _kMessagesByContact = <String, List<_Message>>{
   '2': [
     const _Message(dateLabel: 'Yesterday'),
@@ -214,20 +219,33 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  String _selectedId = '2'; // Lindsey Curtis active by default
+  String _selectedId = '';
 
   final _msgCtrl    = TextEditingController();
   final _searchCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
 
   String _search = '';
+  bool _loadingConversations = true;
+  bool _loadingMessages = false;
+
+  // API data
+  List<Map<String, dynamic>> _conversations = [];
+  List<_Message> _messages = [];
+  String? _myUserId;
+
+  ApiClient get _api => context.read<ApiClient>();
 
   @override
   void initState() {
     super.initState();
-    // Rebuild when text field changes so send-button activates/deactivates.
     _msgCtrl.addListener(() => setState(() {}));
     _searchCtrl.addListener(() => setState(() => _search = _searchCtrl.text));
+    _loadConversations();
+    final authState = context.read<AuthBloc>().state;
+    if (authState is AuthAuthenticated) {
+      _myUserId = authState.user.id;
+    }
   }
 
   @override
@@ -238,8 +256,137 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  _Contact get _active =>
-      _kContacts.firstWhere((c) => c.id == _selectedId);
+  Future<void> _loadConversations() async {
+    setState(() => _loadingConversations = true);
+    try {
+      final res = await _api.getConversations(search: _search.isEmpty ? null : _search);
+      _conversations = (res.data as List).cast<Map<String, dynamic>>();
+      if (_conversations.isNotEmpty && _selectedId.isEmpty) {
+        _selectedId = _conversations.first['id'] as String;
+        _loadMessages(_selectedId);
+      }
+    } catch (_) {
+      _conversations = [];
+    }
+    if (mounted) setState(() => _loadingConversations = false);
+  }
+
+  Future<void> _loadMessages(String conversationId) async {
+    setState(() => _loadingMessages = true);
+    try {
+      final res = await _api.getMessages(conversationId);
+      final data = res.data as Map<String, dynamic>;
+      final msgs = (data['messages'] as List).cast<Map<String, dynamic>>();
+
+      _messages = msgs.map((m) {
+        final type = m['type'] as String? ?? 'text';
+        final senderId = m['sender_id'] as String?;
+        final isSent = senderId == _myUserId;
+        final time = _formatTime(m['created_at'] as String? ?? '');
+
+        if (type == 'task_review') {
+          final task = m['task'] as Map<String, dynamic>?;
+          return _Message(
+            sent: isSent,
+            time: time,
+            task: task != null ? _ChatTask(
+              title:       task['title'] as String? ?? '',
+              description: '',
+              assignee:    task['person_name'] as String? ?? '',
+              priority:    task['priority'] as String? ?? 'Medium',
+              type:        '',
+              date:        '',
+              reviewStatus: _parseReviewStatus(m['review_status'] as String?),
+            ) : null,
+          );
+        }
+
+        return _Message(
+          text: m['content'] as String?,
+          sent: isSent,
+          time: time,
+        );
+      }).toList().reversed.toList(); // API returns newest first, we want oldest first
+    } catch (_) {
+      _messages = [];
+    }
+    if (mounted) setState(() => _loadingMessages = false);
+    _scrollToBottom();
+  }
+
+  static _TaskReviewStatus _parseReviewStatus(String? s) => switch (s) {
+    'completed' => _TaskReviewStatus.completed,
+    'rejected'  => _TaskReviewStatus.rejected,
+    _           => _TaskReviewStatus.pending,
+  };
+
+  String _formatTime(String isoString) {
+    if (isoString.isEmpty) return '';
+    final dt = DateTime.tryParse(isoString);
+    if (dt == null) return '';
+    final local = dt.toLocal();
+    final h = local.hour;
+    final m = local.minute.toString().padLeft(2, '0');
+    final ampm = h >= 12 ? 'PM' : 'AM';
+    final h12 = h == 0 ? 12 : (h > 12 ? h - 12 : h);
+    return '$h12:$m $ampm';
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+      }
+    });
+  }
+
+  // Build a _Contact from API conversation data
+  _Contact _contactFromConversation(Map<String, dynamic> conv) {
+    final members = (conv['members'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    // Find the other person (not me)
+    final other = members.firstWhere(
+      (m) => m['id'] != _myUserId,
+      orElse: () => members.isNotEmpty ? members.first : <String, dynamic>{},
+    );
+    final name = conv['name'] as String? ?? other['name'] as String? ?? 'Unknown';
+    final initials = name.split(' ').map((w) => w.isNotEmpty ? w[0] : '').take(2).join().toUpperCase();
+    final lastMsg = conv['last_message'] as Map<String, dynamic>?;
+    final preview = lastMsg?['content'] as String? ?? '';
+
+    return _Contact(
+      id:          conv['id'] as String,
+      name:        name,
+      role:        other['role'] as String? ?? '',
+      initials:    initials,
+      avatarColor: _avatarColor(name),
+      status:      _Status.offline, // No online status yet
+      lastSeen:    '',
+      preview:     preview,
+    );
+  }
+
+  static Color _avatarColor(String name) {
+    final colors = [
+      const Color(0xFF5B8CFF), const Color(0xFF1A1A2E), const Color(0xFF4CAF50),
+      const Color(0xFF424242), const Color(0xFF607D8B), const Color(0xFFE94560),
+    ];
+    return colors[name.hashCode.abs() % colors.length];
+  }
+
+  _Contact get _active {
+    final conv = _conversations.firstWhere(
+      (c) => c['id'] == _selectedId,
+      orElse: () => <String, dynamic>{},
+    );
+    if (conv.isEmpty) {
+      return const _Contact(
+        id: '', name: 'Select a chat', role: '', initials: '',
+        avatarColor: Color(0xFF9E9E9E), status: _Status.offline,
+        lastSeen: '', preview: '',
+      );
+    }
+    return _contactFromConversation(conv);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -257,9 +404,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // ────────────────────────────────────────────────────────────────────────────
 
   Widget _buildLeftPanel() {
+    final contacts = _conversations.map((c) => _contactFromConversation(c)).toList();
     final filtered = _search.isEmpty
-        ? _kContacts
-        : _kContacts
+        ? contacts
+        : contacts
             .where((c) =>
                 c.name.toLowerCase().contains(_search.toLowerCase()) ||
                 c.role.toLowerCase().contains(_search.toLowerCase()))
@@ -314,10 +462,14 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           // ── Contact rows ──────────────────────────────────────────────────
           Expanded(
-            child: ListView.builder(
-              itemCount: filtered.length,
-              itemBuilder: (_, i) => _buildContactRow(filtered[i]),
-            ),
+            child: _loadingConversations
+                ? const Center(child: CircularProgressIndicator())
+                : filtered.isEmpty
+                    ? const Center(child: Text('No conversations', style: TextStyle(color: Colors.grey, fontSize: 13)))
+                    : ListView.builder(
+                        itemCount: filtered.length,
+                        itemBuilder: (_, i) => _buildContactRow(filtered[i]),
+                      ),
           ),
         ],
       ),
@@ -327,7 +479,10 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildContactRow(_Contact c) {
     final isActive = c.id == _selectedId;
     return InkWell(
-      onTap: () => setState(() => _selectedId = c.id),
+      onTap: () {
+        setState(() => _selectedId = c.id);
+        _loadMessages(c.id);
+      },
       child: Container(
         // Subtle accent tint on the active row so it's obvious which chat is open.
         color: isActive ? _kAccent.withValues(alpha: 0.07) : null,
@@ -388,7 +543,13 @@ class _ChatScreenState extends State<ChatScreen> {
       children: [
         _buildTopBar(contact),
         Container(height: 1, color: _kBorder),
-        Expanded(child: _buildMessages(contact)),
+        Expanded(
+          child: _loadingMessages
+              ? const Center(child: CircularProgressIndicator())
+              : _selectedId.isEmpty
+                  ? const Center(child: Text('Select a conversation', style: TextStyle(color: Colors.grey)))
+                  : _buildMessages(contact),
+        ),
         Container(height: 1, color: _kBorder),
         _buildInputBar(),
       ],
@@ -455,7 +616,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // Scrollable message list
   Widget _buildMessages(_Contact contact) {
-    final messages = _kMessagesByContact[contact.id] ?? [];
+    final messages = _messages;
     return ListView.builder(
       controller: _scrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
@@ -926,10 +1087,22 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _sendMessage() {
-    // Real implementation would send to backend/WebSocket.
-    // For now just clear the field.
+  Future<void> _sendMessage() async {
+    final text = _msgCtrl.text.trim();
+    if (text.isEmpty || _selectedId.isEmpty) return;
     _msgCtrl.clear();
+
+    // Optimistically add the message locally
+    setState(() {
+      _messages.add(_Message(text: text, sent: true, time: _formatTime(DateTime.now().toIso8601String())));
+    });
+    _scrollToBottom();
+
+    try {
+      await _api.sendMessage(_selectedId, text);
+      // Reload conversations to update last_message preview
+      _loadConversations();
+    } catch (_) {}
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
