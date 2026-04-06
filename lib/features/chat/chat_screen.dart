@@ -39,12 +39,14 @@ class _Contact {
 
 class _Message {
   // When dateLabel is non-null the row renders as a date separator, not a bubble.
-  final String? dateLabel;
-  final String? text;
-  final bool    sent;          // true = me (right), false = them (left)
-  final String  time;
-  final String? imageCaption;  // non-null → render image placeholder + caption
-  final _ChatTask? task;       // non-null → render task review card
+  final String?        dateLabel;
+  final String?        text;
+  final bool           sent;
+  final String         time;
+  final String?        imageCaption;
+  final _ChatTask?     task;       // task_review card
+  final _PauseRequest? pauseReq;  // pause_request card
+  final _IdeaRequest?  ideaReq;   // idea_request card
 
   const _Message({
     this.dateLabel,
@@ -53,7 +55,64 @@ class _Message {
     this.time        = '',
     this.imageCaption,
     this.task,
+    this.pauseReq,
+    this.ideaReq,
   });
+}
+
+// ── Pause request model ───────────────────────────────────────────────────────
+
+class _PauseRequest {
+  final String  id;
+  final String  reason;
+  final String? note;
+  final String  taskTitle;
+  final String  requestedBy; // uuid — to detect if current user is assignee
+  String        status;      // pending | approved | denied
+
+  _PauseRequest({
+    required this.id,
+    required this.reason,
+    this.note,
+    required this.taskTitle,
+    required this.requestedBy,
+    this.status = 'pending',
+  });
+
+  factory _PauseRequest.fromJson(Map<String, dynamic> j) => _PauseRequest(
+    id:          j['id'] as String? ?? '',
+    reason:      (j['reason'] as String? ?? '').replaceAll('_', ' '),
+    note:        j['note'] as String?,
+    taskTitle:   j['task_title'] as String? ?? '',
+    requestedBy: j['requested_by'] as String? ?? '',
+    status:      j['status'] as String? ?? 'pending',
+  );
+}
+
+// ── Idea request model ────────────────────────────────────────────────────────
+
+class _IdeaRequest {
+  final String id;
+  final String reason;
+  final String taskTitle;
+  final String requestedBy;
+  String       status; // pending | approved | denied
+
+  _IdeaRequest({
+    required this.id,
+    required this.reason,
+    required this.taskTitle,
+    required this.requestedBy,
+    this.status = 'pending',
+  });
+
+  factory _IdeaRequest.fromJson(Map<String, dynamic> j) => _IdeaRequest(
+    id:          j['id'] as String? ?? '',
+    reason:      j['reason'] as String? ?? '',
+    taskTitle:   j['task_title'] as String? ?? '',
+    requestedBy: j['requested_by'] as String? ?? '',
+    status:      j['status'] as String? ?? 'pending',
+  );
 }
 
 // ── Task review models ────────────────────────────────────────────────────────
@@ -61,24 +120,38 @@ class _Message {
 enum _TaskReviewStatus { pending, completed, rejected }
 
 class _ChatTask {
-  final String title;
-  final String description;
-  final String assignee;
-  final String priority;  // High / Medium / Low
-  final String type;
-  final String date;       // display string
-  final int    commentCount;
-  _TaskReviewStatus reviewStatus;
+  final String  messageId;  // ops_messages.id — needed to call reviewTask API
+  final String  taskId;     // ops_tasks.id
+  final String  title;
+  final String  description;
+  final String  assignee;
+  final String  reviewerName;
+  final String  reviewerId;
+  final String  priority;   // Urgent / High / Medium / Low
+  final String  type;
+  final String  date;       // display string
+  final String? endDate;    // display string, nullable
+  bool          isPaused;
+  final int     commentCount;
+  _TaskReviewStatus              reviewStatus;
+  Map<String, dynamic>?          pendingPauseRequest; // non-null = pause needs approval
 
   _ChatTask({
+    required this.messageId,
+    required this.taskId,
     required this.title,
     required this.description,
     required this.assignee,
+    this.reviewerName         = '',
+    this.reviewerId           = '',
     required this.priority,
     required this.type,
     required this.date,
-    this.commentCount   = 0,
-    this.reviewStatus   = _TaskReviewStatus.pending,
+    this.endDate              = null,
+    this.isPaused             = false,
+    this.commentCount         = 0,
+    this.reviewStatus         = _TaskReviewStatus.pending,
+    this.pendingPauseRequest,
   });
 }
 
@@ -170,6 +243,8 @@ final _kMessagesByContact = <String, List<_Message>>{
     _Message(
       sent: false, time: '10:30 AM',
       task: _ChatTask(
+        messageId:   'mock-msg-1',
+        taskId:      'mock-task-1',
         title:       'Build auth flow',
         description: 'Implement GoTrue login, logout and session refresh',
         assignee:    'Bob',
@@ -193,6 +268,8 @@ final _kMessagesByContact = <String, List<_Message>>{
     _Message(
       sent: false, time: '11:00 AM',
       task: _ChatTask(
+        messageId:   'mock-msg-2',
+        taskId:      'mock-task-2',
         title:       'Write API documentation',
         description: 'Document all REST endpoints with examples and error codes',
         assignee:    'Charlie',
@@ -284,19 +361,82 @@ class _ChatScreenState extends State<ChatScreen> {
         final isSent = senderId == _myUserId;
         final time = _formatTime(m['created_at'] as String? ?? '');
 
+        if (type == 'idea_request') {
+          final ir = m['idea_request'] as Map<String, dynamic>?;
+          if (ir != null) {
+            return _Message(
+              sent:    isSent,
+              time:    time,
+              ideaReq: _IdeaRequest.fromJson(ir),
+            );
+          }
+        }
+
+        if (type == 'pause_request') {
+          final pr = m['pause_request'] as Map<String, dynamic>?;
+          if (pr != null) {
+            return _Message(
+              sent:     isSent,
+              time:     time,
+              pauseReq: _PauseRequest.fromJson(pr),
+            );
+          }
+        }
+
         if (type == 'task_review') {
           final task = m['task'] as Map<String, dynamic>?;
+          // Extract person name from assignees array (backend uses junction table)
+          String assigneeName = '';
+          final assignees = task?['assignees'] as List?;
+          if (assignees != null && assignees.isNotEmpty) {
+            assigneeName = (assignees.first as Map)['name']?.toString() ?? '';
+          } else {
+            assigneeName = task?['person_name']?.toString() ?? '';
+          }
+          final priorityRaw = (task?['priority'] as String? ?? 'medium').toLowerCase();
+          final priorityLabel = priorityRaw.isNotEmpty
+              ? priorityRaw[0].toUpperCase() + priorityRaw.substring(1)
+              : 'Medium';
+          // Extract reviewer name + id
+          String reviewerName = '';
+          String reviewerId   = '';
+          final reviewers = task?['reviewers'] as List?;
+          if (reviewers != null && reviewers.isNotEmpty) {
+            reviewerName = (reviewers.first as Map)['name']?.toString() ?? '';
+            reviewerId   = (reviewers.first as Map)['id']?.toString()   ?? '';
+          }
+          // Format end_date
+          String? endDateStr;
+          final rawEnd = task?['end_date'] as String?;
+          if (rawEnd != null && rawEnd.isNotEmpty) {
+            final dt = DateTime.tryParse(rawEnd);
+            if (dt != null) endDateStr = _fmtDate(dt);
+          }
+          // Format start date
+          String dateStr = '';
+          final rawDate = task?['date'] as String?;
+          if (rawDate != null && rawDate.isNotEmpty) {
+            final dt = DateTime.tryParse(rawDate);
+            if (dt != null) dateStr = _fmtDate(dt);
+          }
           return _Message(
             sent: isSent,
             time: time,
             task: task != null ? _ChatTask(
-              title:       task['title'] as String? ?? '',
-              description: '',
-              assignee:    task['person_name'] as String? ?? '',
-              priority:    task['priority'] as String? ?? 'Medium',
-              type:        '',
-              date:        '',
-              reviewStatus: _parseReviewStatus(m['review_status'] as String?),
+              messageId:    m['id'] as String? ?? '',
+              taskId:       task['id'] as String? ?? '',
+              title:        task['title'] as String? ?? '',
+              description:  task['description'] as String? ?? '',
+              assignee:     assigneeName,
+              reviewerName:        reviewerName,
+              reviewerId:          reviewerId,
+              priority:            priorityLabel,
+              type:                '',
+              date:                dateStr,
+              endDate:             endDateStr,
+              isPaused:            task['is_paused'] as bool? ?? false,
+              reviewStatus:        _parseReviewStatus(m['review_status'] as String?),
+              pendingPauseRequest: task['pending_pause_request'] as Map<String, dynamic>?,
             ) : null,
           );
         }
@@ -312,6 +452,11 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (mounted) setState(() => _loadingMessages = false);
     _scrollToBottom();
+  }
+
+  static String _fmtDate(DateTime d) {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return '${months[d.month - 1]} ${d.day}';
   }
 
   static _TaskReviewStatus _parseReviewStatus(String? s) => switch (s) {
@@ -625,6 +770,8 @@ class _ChatScreenState extends State<ChatScreen> {
         final msg = messages[i];
         if (msg.dateLabel != null)     return _buildDateSeparator(msg.dateLabel!);
         if (msg.task != null)          return _buildTaskReviewCard(msg, contact);
+        if (msg.pauseReq != null)      return _buildPauseRequestCard(msg, contact);
+        if (msg.ideaReq != null)       return _buildIdeaRequestCard(msg, contact);
         if (msg.imageCaption != null)  return _buildImageMessage(msg, contact);
         return _buildTextBubble(msg, contact);
       },
@@ -778,6 +925,55 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // ── Task review card inside chat ────────────────────────────────────────────
 
+  Future<void> _reviewPauseFromChat(_ChatTask task, String reqId, String status) async {
+    final previous = task.pendingPauseRequest;
+    setState(() {
+      task.pendingPauseRequest = null;
+      if (status == 'approved') task.isPaused = true;
+    });
+    try {
+      await _api.reviewPauseRequest(reqId, status);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => task.pendingPauseRequest = previous);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to $status pause request')),
+      );
+    }
+  }
+
+  Future<void> _reviewTaskFromChat(_ChatTask task, String status) async {
+    // No messageId means it's a mock task — just update locally
+    if (task.messageId.isEmpty || task.messageId.startsWith('mock-')) {
+      setState(() {
+        task.reviewStatus = status == 'completed'
+            ? _TaskReviewStatus.completed
+            : _TaskReviewStatus.rejected;
+      });
+      return;
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    // Optimistic update
+    final previous = task.reviewStatus;
+    setState(() {
+      task.reviewStatus = status == 'completed'
+          ? _TaskReviewStatus.completed
+          : _TaskReviewStatus.rejected;
+    });
+
+    try {
+      await _api.reviewTaskFromChat(task.messageId, status);
+    } catch (_) {
+      if (!mounted) return;
+      // Revert on failure
+      setState(() => task.reviewStatus = previous);
+      messenger.showSnackBar(
+        SnackBar(content: Text('Failed to ${status == 'completed' ? 'approve' : 'reject'} task')),
+      );
+    }
+  }
+
   Widget _buildTaskReviewCard(_Message msg, _Contact contact) {
     final task = msg.task!;
     return Padding(
@@ -798,10 +994,12 @@ class _ChatScreenState extends State<ChatScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _ChatTaskCard(
-                task:     task,
-                onReject:   () => setState(() => task.reviewStatus = _TaskReviewStatus.rejected),
-                onComplete: () => setState(() => task.reviewStatus = _TaskReviewStatus.completed),
-                onTap:      () => _showTaskPreview(context, task),
+                task:          task,
+                onReject:      () => _reviewTaskFromChat(task, 'rejected'),
+                onComplete:    () => _reviewTaskFromChat(task, 'completed'),
+                onTap:         () => _showTaskPreview(context, task),
+                currentUserId: _myUserId,
+                onPauseReview: (reqId, status) => _reviewPauseFromChat(task, reqId, status),
               ),
               const SizedBox(height: 4),
               Text('${contact.name}, ${msg.time}',
@@ -811,6 +1009,106 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildPauseRequestCard(_Message msg, _Contact contact) {
+    final pr = msg.pauseReq!;
+    final isReviewer = pr.requestedBy != _myUserId; // reviewer is the non-requester
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          CircleAvatar(
+            radius: 14,
+            backgroundColor: contact.avatarColor,
+            child: Text(contact.initials,
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+          ),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _PauseRequestCard(
+                pauseReq:  pr,
+                isReviewer: isReviewer,
+                onApprove: () => _reviewPauseReqCard(pr, 'approved'),
+                onDeny:    () => _reviewPauseReqCard(pr, 'denied'),
+              ),
+              const SizedBox(height: 4),
+              Text('${contact.name}, ${msg.time}',
+                  style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _reviewPauseReqCard(_PauseRequest pr, String status) async {
+    final previous = pr.status;
+    setState(() => pr.status = status);
+    try {
+      await _api.reviewPauseRequest(pr.id, status);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => pr.status = previous);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to $status pause request')),
+      );
+    }
+  }
+
+  Widget _buildIdeaRequestCard(_Message msg, _Contact contact) {
+    final ir = msg.ideaReq!;
+    final isReviewer = ir.requestedBy != _myUserId;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          CircleAvatar(
+            radius: 14,
+            backgroundColor: contact.avatarColor,
+            child: Text(contact.initials,
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+          ),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _IdeaRequestCard(
+                ideaReq:    ir,
+                isReviewer: isReviewer,
+                onApprove:  () => _reviewIdeaReqCard(ir, 'approved'),
+                onDeny:     () => _reviewIdeaReqCard(ir, 'denied'),
+              ),
+              const SizedBox(height: 4),
+              Text('${contact.name}, ${msg.time}',
+                  style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _reviewIdeaReqCard(_IdeaRequest ir, String status) async {
+    final previous = ir.status;
+    setState(() => ir.status = status);
+    try {
+      await _api.reviewIdeaRequest(ir.id, status);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => ir.status = previous);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to $status idea request')),
+      );
+    }
   }
 
   // ── Task preview dialog ──────────────────────────────────────────────────────
@@ -1158,15 +1456,20 @@ class _ChatTaskCard extends StatelessWidget {
   final VoidCallback onReject;
   final VoidCallback onComplete;
   final VoidCallback? onTap;
+  final String?      currentUserId;
+  final void Function(String reqId, String status)? onPauseReview;
 
   const _ChatTaskCard({
     required this.task,
     required this.onReject,
     required this.onComplete,
     this.onTap,
+    this.currentUserId,
+    this.onPauseReview,
   });
 
   Color get _priorityColor => switch (task.priority) {
+    'Urgent' => const Color(0xFF7C3AED),
     'High'   => _kHigh,
     'Medium' => _kMedium,
     'Low'    => _kLow,
@@ -1245,12 +1548,19 @@ class _ChatTaskCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Priority + Type badges
+                // Priority + Type badges + paused badge
                 Row(children: [
                   _Badge(task.priority, _priorityColor),
-                  const SizedBox(width: 6),
-                  _Badge(task.type, const Color(0xFF6366F1)),
+                  if (task.type.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    _Badge(task.type, const Color(0xFF6366F1)),
+                  ],
                   const Spacer(),
+                  if (task.isPaused) ...[
+                    const Icon(Icons.pause_circle_outline_rounded,
+                        size: 14, color: Color(0xFF9CA3AF)),
+                    const SizedBox(width: 6),
+                  ],
                   if (isCompleted)
                     const Icon(Icons.check_circle_rounded, size: 14, color: _kGreen),
                 ]),
@@ -1276,7 +1586,7 @@ class _ChatTaskCard extends StatelessWidget {
                 const Divider(height: 1, color: _kBorder),
                 const SizedBox(height: 10),
 
-                // Assignee + meta
+                // Assignee + reviewer
                 Row(children: [
                   if (task.assignee.isNotEmpty) ...[
                     CircleAvatar(
@@ -1290,22 +1600,113 @@ class _ChatTaskCard extends StatelessWidget {
                     Text(task.assignee,
                         style: const TextStyle(fontSize: 11, color: _kMuted)),
                   ],
+                  if (task.reviewerName.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    const Icon(Icons.shield_outlined, size: 11, color: _kMuted),
+                    const SizedBox(width: 3),
+                    Text(task.reviewerName,
+                        style: const TextStyle(fontSize: 11, color: _kMuted)),
+                  ],
+                ]),
+                const SizedBox(height: 6),
+                // Date + end_date + comment count
+                Row(children: [
+                  if (task.date.isNotEmpty) ...[
+                    Icon(Icons.calendar_today_outlined, size: 11, color: _kMuted),
+                    const SizedBox(width: 3),
+                    Text(
+                      task.endDate != null
+                          ? '${task.date} → ${task.endDate}'
+                          : task.date,
+                      style: const TextStyle(fontSize: 10, color: _kMuted),
+                    ),
+                  ],
                   const Spacer(),
                   if (task.commentCount > 0) ...[
                     Icon(Icons.chat_bubble_outline_rounded, size: 11, color: _kMuted),
                     const SizedBox(width: 3),
                     Text('${task.commentCount}',
                         style: const TextStyle(fontSize: 10, color: _kMuted)),
-                    const SizedBox(width: 8),
                   ],
-                  Icon(Icons.calendar_today_outlined, size: 11, color: _kMuted),
-                  const SizedBox(width: 3),
-                  Text(task.date,
-                      style: const TextStyle(fontSize: 10, color: _kMuted)),
                 ]),
               ],
             ),
           ),
+
+          // ── Pause approve/deny (when pause request pending & viewer is reviewer) ──
+          if (task.pendingPauseRequest != null &&
+              currentUserId != null &&
+              currentUserId == task.reviewerId) ...[
+            const Divider(height: 1, color: _kBorder),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    const Icon(Icons.pause_circle_outline_rounded,
+                        size: 12, color: Color(0xFFF59E0B)),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Pause requested — ${task.pendingPauseRequest!['reason'] ?? ''}',
+                      style: const TextStyle(fontSize: 11, color: Color(0xFFF59E0B),
+                          fontWeight: FontWeight.w600),
+                    ),
+                  ]),
+                  if ((task.pendingPauseRequest!['note'] as String?)?.isNotEmpty == true) ...[
+                    const SizedBox(height: 2),
+                    Padding(
+                      padding: const EdgeInsets.only(left: 18),
+                      child: Text(task.pendingPauseRequest!['note'] as String,
+                          style: const TextStyle(fontSize: 11, color: _kMuted)),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => onPauseReview?.call(
+                            task.pendingPauseRequest!['id'] as String, 'denied'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: _kHigh,
+                          side: const BorderSide(color: _kHigh),
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                        ),
+                        child: const Text('Deny', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: () => onPauseReview?.call(
+                            task.pendingPauseRequest!['id'] as String, 'approved'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF10B981),
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                        ),
+                        child: const Text('Approve Pause', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ]),
+                ],
+              ),
+            ),
+          ] else if (task.pendingPauseRequest != null) ...[
+            // Assignee sees read-only pending pill
+            const Divider(height: 1, color: _kBorder),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(children: [
+                const Icon(Icons.hourglass_top_rounded, size: 12, color: Color(0xFFF59E0B)),
+                const SizedBox(width: 6),
+                const Text('Pause awaiting approval',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                        color: Color(0xFFF59E0B))),
+              ]),
+            ),
+          ],
 
           // ── Action buttons (only when pending) ──────────────────────────
           if (isPending) ...[
@@ -1378,6 +1779,341 @@ class _ChatTaskCard extends StatelessWidget {
 }
 
 // ─── Reusable badge (priority / type) ─────────────────────────────────────────
+
+// ─── Pause request card ───────────────────────────────────────────────────────
+
+class _PauseRequestCard extends StatelessWidget {
+  final _PauseRequest pauseReq;
+  final bool         isReviewer;
+  final VoidCallback onApprove;
+  final VoidCallback onDeny;
+
+  const _PauseRequestCard({
+    required this.pauseReq,
+    required this.isReviewer,
+    required this.onApprove,
+    required this.onDeny,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isPending  = pauseReq.status == 'pending';
+    final isApproved = pauseReq.status == 'approved';
+
+    final borderColor = isApproved
+        ? _kGreen
+        : pauseReq.status == 'denied'
+            ? _kHigh
+            : const Color(0xFFF59E0B);
+
+    return Container(
+      width: 320,
+      decoration: BoxDecoration(
+        color:        Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border:       Border.all(color: borderColor, width: 1.5),
+        boxShadow: const [
+          BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: isApproved
+                  ? const Color(0xFFF0FDF4)
+                  : pauseReq.status == 'denied'
+                      ? const Color(0xFFFFF5F5)
+                      : const Color(0xFFFFFBEB),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(7)),
+            ),
+            child: Row(children: [
+              Icon(
+                isApproved
+                    ? Icons.check_circle_rounded
+                    : pauseReq.status == 'denied'
+                        ? Icons.cancel_rounded
+                        : Icons.pause_circle_outline_rounded,
+                size:  15,
+                color: isApproved ? _kGreen : pauseReq.status == 'denied' ? _kHigh : const Color(0xFFF59E0B),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                isApproved ? 'Pause Approved' : pauseReq.status == 'denied' ? 'Pause Denied' : 'Pause Requested',
+                style: TextStyle(
+                  fontSize:   12,
+                  fontWeight: FontWeight.w600,
+                  color: isApproved ? _kGreen : pauseReq.status == 'denied' ? _kHigh : const Color(0xFFF59E0B),
+                ),
+              ),
+            ]),
+          ),
+
+          const Divider(height: 1, color: _kBorder),
+
+          // Body
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(pauseReq.taskTitle,
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary)),
+                const SizedBox(height: 6),
+                Row(children: [
+                  const Icon(Icons.label_outline_rounded, size: 12, color: _kMuted),
+                  const SizedBox(width: 4),
+                  Text('Reason: ${pauseReq.reason}',
+                      style: const TextStyle(fontSize: 12, color: _kMuted)),
+                ]),
+                if (pauseReq.note != null && pauseReq.note!.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Icon(Icons.notes_rounded, size: 12, color: _kMuted),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(pauseReq.note!,
+                          style: const TextStyle(fontSize: 12, color: _kMuted)),
+                    ),
+                  ]),
+                ],
+              ],
+            ),
+          ),
+
+          // Approve / Deny buttons — reviewer only, pending only
+          if (isPending && isReviewer) ...[
+            const Divider(height: 1, color: _kBorder),
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: Row(children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: onDeny,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _kHigh,
+                      side:    const BorderSide(color: _kHigh),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape:   RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    ),
+                    child: const Text('Deny', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: onApprove,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _kGreen,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape:   RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    ),
+                    child: const Text('Approve', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  ),
+                ),
+              ]),
+            ),
+          ] else if (!isPending) ...[
+            // Status stamp
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color:        isApproved ? const Color(0xFFF0FDF4) : const Color(0xFFFFF5F5),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(
+                    isApproved ? Icons.check_circle_rounded : Icons.cancel_rounded,
+                    size: 12,
+                    color: isApproved ? _kGreen : _kHigh,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    isApproved ? 'Approved' : 'Denied',
+                    style: TextStyle(
+                      fontSize:   11,
+                      fontWeight: FontWeight.w600,
+                      color:      isApproved ? _kGreen : _kHigh,
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Idea request card ────────────────────────────────────────────────────────
+
+class _IdeaRequestCard extends StatelessWidget {
+  final _IdeaRequest ideaReq;
+  final bool         isReviewer;
+  final VoidCallback onApprove;
+  final VoidCallback onDeny;
+
+  const _IdeaRequestCard({
+    required this.ideaReq,
+    required this.isReviewer,
+    required this.onApprove,
+    required this.onDeny,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isPending  = ideaReq.status == 'pending';
+    final isApproved = ideaReq.status == 'approved';
+
+    final accentColor = const Color(0xFF8B5CF6); // violet for ideas
+    final borderColor = isApproved
+        ? _kGreen
+        : ideaReq.status == 'denied'
+            ? _kHigh
+            : accentColor;
+
+    return Container(
+      width: 320,
+      decoration: BoxDecoration(
+        color:        Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border:       Border.all(color: borderColor, width: 1.5),
+        boxShadow: const [
+          BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: isApproved
+                  ? const Color(0xFFF0FDF4)
+                  : ideaReq.status == 'denied'
+                      ? const Color(0xFFFFF5F5)
+                      : const Color(0xFFF5F3FF),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(7)),
+            ),
+            child: Row(children: [
+              Icon(
+                isApproved
+                    ? Icons.check_circle_rounded
+                    : ideaReq.status == 'denied'
+                        ? Icons.cancel_rounded
+                        : Icons.lightbulb_outline_rounded,
+                size:  15,
+                color: isApproved ? _kGreen : ideaReq.status == 'denied' ? _kHigh : accentColor,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                isApproved ? 'Moved to Ideas' : ideaReq.status == 'denied' ? 'Idea Denied' : 'Idea Move Requested',
+                style: TextStyle(
+                  fontSize:   12,
+                  fontWeight: FontWeight.w600,
+                  color: isApproved ? _kGreen : ideaReq.status == 'denied' ? _kHigh : accentColor,
+                ),
+              ),
+            ]),
+          ),
+
+          const Divider(height: 1, color: _kBorder),
+
+          // Body
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(ideaReq.taskTitle,
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary)),
+                const SizedBox(height: 6),
+                Row(children: [
+                  const Icon(Icons.notes_rounded, size: 12, color: _kMuted),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(ideaReq.reason,
+                        style: const TextStyle(fontSize: 12, color: _kMuted)),
+                  ),
+                ]),
+              ],
+            ),
+          ),
+
+          // Approve / Deny — reviewer + pending only
+          if (isPending && isReviewer) ...[
+            const Divider(height: 1, color: _kBorder),
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: Row(children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: onDeny,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _kHigh,
+                      side:    const BorderSide(color: _kHigh),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape:   RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    ),
+                    child: const Text('Deny', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: onApprove,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: accentColor,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape:   RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    ),
+                    child: const Text('Move to Ideas', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  ),
+                ),
+              ]),
+            ),
+          ] else if (!isPending) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color:        isApproved ? const Color(0xFFF0FDF4) : const Color(0xFFFFF5F5),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(
+                    isApproved ? Icons.check_circle_rounded : Icons.cancel_rounded,
+                    size: 12,
+                    color: isApproved ? _kGreen : _kHigh,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    isApproved ? 'Moved to Ideas' : 'Denied',
+                    style: TextStyle(
+                      fontSize:   11,
+                      fontWeight: FontWeight.w600,
+                      color:      isApproved ? _kGreen : _kHigh,
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
 
 class _Badge extends StatelessWidget {
   final String label;

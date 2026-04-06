@@ -1,9 +1,13 @@
+import 'dart:async';
 import 'dart:ui' show ImageFilter;
 import 'dart:math' show min;
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:appflowy_board/appflowy_board.dart';
 import '../../core/api/api_client.dart';
+import '../../core/auth/auth_bloc.dart';
+import '../../core/auth/user_role.dart';
 import '../../shared/widgets/select_option_field.dart';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
@@ -27,18 +31,26 @@ const _kLow        = Color(0xFF3B82F6); // blue
 
 // ─── Priority enum ────────────────────────────────────────────────────────────
 
-enum Priority { high, medium, low }
+enum Priority { urgent, high, medium, low }
 
 extension PriorityX on Priority {
   String get label => switch (this) {
+    Priority.urgent => 'Urgent',
     Priority.high   => 'High',
     Priority.medium => 'Medium',
     Priority.low    => 'Low',
   };
   Color get color => switch (this) {
+    Priority.urgent => Color(0xFF7C3AED),
     Priority.high   => _kHigh,
     Priority.medium => _kMedium,
     Priority.low    => _kLow,
+  };
+  String get apiValue => switch (this) {
+    Priority.urgent => 'urgent',
+    Priority.high   => 'high',
+    Priority.medium => 'medium',
+    Priority.low    => 'low',
   };
 }
 
@@ -62,9 +74,11 @@ class TaskItem extends AppFlowyGroupItem {
   List<Map<String, dynamic>> commentsList; // full comment objects from API
   bool     isDone;
   String?  columnGroup;
+  String?  createdBy;   // UUID of creator — used to gate "Move to Idea"
   int      sortOrder;
   // Pause/drift fields
   bool     isPaused;
+  Map<String, dynamic>? pendingPauseRequest; // non-null = pending approval
   int?     plannedDays;
   int?     pausedDays;
   int?     actualDays;
@@ -89,8 +103,10 @@ class TaskItem extends AppFlowyGroupItem {
     List<Map<String, dynamic>>? commentsList,
     this.isDone      = false,
     this.columnGroup,
+    this.createdBy,
     this.sortOrder   = 0,
-    this.isPaused    = false,
+    this.isPaused            = false,
+    this.pendingPauseRequest,
     this.plannedDays,
     this.pausedDays,
     this.actualDays,
@@ -145,8 +161,10 @@ class TaskItem extends AppFlowyGroupItem {
       commentsList: commentsRaw,
       isDone:       status == 'completed',
       columnGroup:  json['column_group'] as String?,
+      createdBy:    json['created_by'] as String?,
       sortOrder:    json['sort_order'] as int? ?? 0,
-      isPaused:     json['is_paused'] as bool? ?? false,
+      isPaused:            json['is_paused'] as bool? ?? false,
+      pendingPauseRequest: json['pending_pause_request'] as Map<String, dynamic>?,
       plannedDays:  json['planned_days'] as int?,
       pausedDays:   json['paused_days'] as int?,
       actualDays:   json['actual_days'] as int?,
@@ -156,6 +174,7 @@ class TaskItem extends AppFlowyGroupItem {
   }
 
   static Priority _parsePriority(String? p) => switch (p) {
+    'urgent' => Priority.urgent,
     'high'   => Priority.high,
     'low'    => Priority.low,
     _        => Priority.medium,
@@ -195,32 +214,24 @@ class _TasksScreenState extends State<TasksScreen> {
   TaskItem? _selectedTask;
   bool _loadingTasks = true;
 
+  // Users loaded from API (for assignee / reviewer dropdowns in new task dialog)
+  List<Map<String, dynamic>> _users = [];
+
   // Task types from backend
   List<SelectOption> _taskTypeOpts = [];
 
-  // ── Filters ──────────────────────────────────────────────────────────────
-  String?   _filterPerson;
-  String?   _filterType;
+  // ── Filters (all stored as API param values / UUIDs) ─────────────────────
+  String?   _filterPerson;    // person_id UUID
+  String?   _filterReviewer;  // reviewer_id UUID
+  String?   _filterType;      // type_id UUID
   Priority? _filterPriority;
-  bool?     _filterDone;
-  final     _allTasks = <TaskItem>[];
-
-  Set<String> get _uniqueAssignees =>
-      _allTasks.map((t) => t.assignee).where((a) => a.isNotEmpty).toSet();
-  Set<String> get _uniqueTypes =>
-      _allTasks.map((t) => t.type).where((t) => t.isNotEmpty).toSet();
-
-  bool _matchesFilter(TaskItem item) {
-    if (_filterPerson   != null && item.assignee != _filterPerson)   return false;
-    if (_filterType     != null && item.type     != _filterType)     return false;
-    if (_filterPriority != null && item.priority != _filterPriority) return false;
-    if (_filterDone     != null && item.isDone   != _filterDone)     return false;
-    return true;
-  }
+  String?   _filterStatus;    // 'not_completed' | 'reviewer' | 'completed' | 'idea'
+  String?   _filterHealth;    // 'active' | 'at_risk' | 'stagnant' | 'dead'
 
   bool get _hasActiveFilter =>
-      _filterPerson != null || _filterType != null ||
-      _filterPriority != null || _filterDone != null;
+      _filterPerson != null || _filterReviewer != null ||
+      _filterType != null || _filterPriority != null ||
+      _filterStatus != null || _filterHealth != null;
 
   ApiClient get _api => context.read<ApiClient>();
 
@@ -237,6 +248,25 @@ class _TasksScreenState extends State<TasksScreen> {
     );
     _loadTasks();
     _loadTaskTypes();
+    _loadUsers();
+  }
+
+  Future<void> _loadUsers() async {
+    try {
+      // GET /users/directory — lightweight list, returns only active users with
+      // id/name/color/role. Works for any authenticated user (not just admins).
+      final res = await _api.getUserDirectory();
+      final list = (res.data as List).cast<Map<String, dynamic>>();
+      if (mounted) setState(() => _users = list);
+      debugPrint('[Tasks] Loaded ${list.length} users from /users/directory');
+    } catch (e) {
+      debugPrint('[Tasks] _loadUsers failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to load users: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _loadTaskTypes() async {
@@ -264,25 +294,53 @@ class _TasksScreenState extends State<TasksScreen> {
     _        => SelectOptionColor.gray,
   };
 
+  static String _stringFromColor(SelectOptionColor c) => switch (c) {
+    SelectOptionColor.purple => 'purple',
+    SelectOptionColor.pink   => 'pink',
+    SelectOptionColor.blue   => 'blue',
+    SelectOptionColor.green  => 'green',
+    SelectOptionColor.orange => 'orange',
+    SelectOptionColor.gray   => 'gray',
+  };
+
   Future<void> _loadTasks() async {
     setState(() => _loadingTasks = true);
     try {
-      final res = await _api.getTasks();
+      final filters = <String, dynamic>{};
+      if (_filterPerson   != null) filters['person_id']   = _filterPerson;
+      if (_filterReviewer != null) filters['reviewer_id'] = _filterReviewer;
+      if (_filterType     != null) filters['type_id']     = _filterType;
+      if (_filterPriority != null) filters['priority']    = _filterPriority!.apiValue;
+      if (_filterStatus   != null) filters['status']      = _filterStatus;
+      if (_filterHealth   != null) filters['health']      = _filterHealth;
+
+      final res = await _api.getTasks(filters: filters.isEmpty ? null : filters);
       final tasks = (res.data as List)
           .map((j) => TaskItem.fromJson(j as Map<String, dynamic>))
           .toList();
 
       // Group tasks by column
-      final todoItems = <AppFlowyGroupItem>[];
+      final todoItems       = <AppFlowyGroupItem>[];
       final inProgressItems = <AppFlowyGroupItem>[];
-      final doneItems = <AppFlowyGroupItem>[];
+      final doneItems       = <AppFlowyGroupItem>[];
+      final ideaItems       = <AppFlowyGroupItem>[];
 
+      final today = DateTime.now();
       for (final task in tasks) {
-        final group = TaskItem.columnToGroup(task.columnGroup);
-        switch (group) {
-          case 'in_progress': inProgressItems.add(task);
-          case 'done':        doneItems.add(task);
-          default:            todoItems.add(task);
+        if (task.status == 'idea' || task.status == 'archived') {
+          ideaItems.add(task);
+        } else if (task.status == 'completed') {
+          doneItems.add(task);
+        } else if (task.date != null &&
+            !task.date!.isAfter(DateTime(today.year, today.month, today.day))) {
+          inProgressItems.add(task);
+        } else {
+          final group = TaskItem.columnToGroup(task.columnGroup);
+          switch (group) {
+            case 'in_progress': inProgressItems.add(task);
+            case 'done':        doneItems.add(task);
+            default:            todoItems.add(task);
+          }
         }
       }
 
@@ -296,20 +354,20 @@ class _TasksScreenState extends State<TasksScreen> {
         _boardCtrl.removeGroup(g.id);
       }
 
-      _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo', name: 'To Do', items: todoItems));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo',        name: 'To Do',       items: todoItems));
       _boardCtrl.addGroup(AppFlowyGroupData(id: 'in_progress', name: 'In Progress', items: inProgressItems));
-      _boardCtrl.addGroup(AppFlowyGroupData(id: 'done', name: 'Done', items: doneItems));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'done',        name: 'Done',        items: doneItems));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'idea',        name: 'Ideas',       items: ideaItems));
 
-      _allTasks.clear();
-      _allTasks.addAll(tasks);
     } catch (_) {
       // If API fails, show empty board
       for (final g in _boardCtrl.groupDatas.toList()) {
         _boardCtrl.removeGroup(g.id);
       }
-      _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo', name: 'To Do', items: []));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo',        name: 'To Do',       items: []));
       _boardCtrl.addGroup(AppFlowyGroupData(id: 'in_progress', name: 'In Progress', items: []));
-      _boardCtrl.addGroup(AppFlowyGroupData(id: 'done', name: 'Done', items: []));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'done',        name: 'Done',        items: []));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'idea',        name: 'Ideas',       items: []));
     }
     if (mounted) setState(() => _loadingTasks = false);
   }
@@ -345,6 +403,7 @@ class _TasksScreenState extends State<TasksScreen> {
     'todo'        => _kTodo,
     'in_progress' => _kInProgress,
     'done'        => _kDone,
+    'idea'        => const Color(0xFF8B5CF6), // violet
     _             => _kMuted,
   };
 
@@ -353,26 +412,39 @@ class _TasksScreenState extends State<TasksScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _TopBar(onAddTask: _showAddTaskDialog),
+        _TopBar(
+          onAddTask:  _showAddTaskDialog,
+          onStagnant: _isAdminUser(context) ? _showStagnantPanel : null,
+          onRequests: _isAdminUser(context) ? _showRequestsPanel : null,
+        ),
         // ── Filter bar ──────────────────────────────────────────────────
         _TaskFilterBar(
           filterPerson:   _filterPerson,
+          filterReviewer: _filterReviewer,
           filterType:     _filterType,
           filterPriority: _filterPriority,
-          filterDone:     _filterDone,
-          assignees:      _uniqueAssignees,
-          types:          _uniqueTypes,
+          filterStatus:   _filterStatus,
+          filterHealth:   _filterHealth,
+          users:          _users,
+          taskTypes:      _taskTypeOpts,
           hasActive:      _hasActiveFilter,
-          onPersonChanged:   (v) => setState(() => _filterPerson = v),
-          onTypeChanged:     (v) => setState(() => _filterType = v),
-          onPriorityChanged: (v) => setState(() => _filterPriority = v),
-          onDoneChanged:     (v) => setState(() => _filterDone = v),
-          onClearAll: () => setState(() {
-            _filterPerson = null;
-            _filterType = null;
-            _filterPriority = null;
-            _filterDone = null;
-          }),
+          onPersonChanged:   (v) { setState(() => _filterPerson   = v); _loadTasks(); },
+          onReviewerChanged: (v) { setState(() => _filterReviewer = v); _loadTasks(); },
+          onTypeChanged:     (v) { setState(() => _filterType     = v); _loadTasks(); },
+          onPriorityChanged: (v) { setState(() => _filterPriority = v); _loadTasks(); },
+          onStatusChanged:   (v) { setState(() => _filterStatus   = v); _loadTasks(); },
+          onHealthChanged:   (v) { setState(() => _filterHealth   = v); _loadTasks(); },
+          onClearAll: () {
+            setState(() {
+              _filterPerson   = null;
+              _filterReviewer = null;
+              _filterType     = null;
+              _filterPriority = null;
+              _filterStatus   = null;
+              _filterHealth   = null;
+            });
+            _loadTasks();
+          },
         ),
         const SizedBox(height: 4),
         Expanded(
@@ -390,12 +462,6 @@ class _TasksScreenState extends State<TasksScreen> {
                     boardScrollController:  _scrollCtrl,
                     cardBuilder: (context, group, groupItem) {
                       final item = groupItem as TaskItem;
-                      if (!_matchesFilter(item)) {
-                        return AppFlowyGroupCard(
-                          key: ValueKey('h_${item.id}'),
-                          child: const SizedBox.shrink(),
-                        );
-                      }
                       return AppFlowyGroupCard(
                         key: ValueKey(item.id),
                         child: _TaskCard(
@@ -476,10 +542,13 @@ class _TasksScreenState extends State<TasksScreen> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: _TaskDetailPanel(
-                    item:        item,
-                    onClose:     () => Navigator.of(ctx).pop(),
-                    onChanged:   () => setState(() {}),
-                    typeOptions: _taskTypeOpts,
+                    item:          item,
+                    onClose:       () => Navigator.of(ctx).pop(),
+                    onChanged:     () => setState(() {}),
+                    typeOptions:   _taskTypeOpts,
+                    currentUserId: (context.read<AuthBloc>().state is AuthAuthenticated)
+                        ? (context.read<AuthBloc>().state as AuthAuthenticated).user.id
+                        : null,
                   ),
                 ),
               ),
@@ -492,10 +561,106 @@ class _TasksScreenState extends State<TasksScreen> {
 
   // ── Add task dialog ─────────────────────────────────────────────────────────
 
-  void _showAddTaskDialog() {
+  bool _isAdminUser(BuildContext context) {
+    final state = context.read<AuthBloc>().state;
+    if (state is! AuthAuthenticated) return false;
+    final role = state.user.role;
+    return role == UserRole.superAdmin || role == UserRole.admin;
+  }
+
+  void _showRequestsPanel() {
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: Colors.black45,
+      transitionDuration: const Duration(milliseconds: 200),
+      transitionBuilder: (_, anim, _, child) => FadeTransition(
+        opacity: anim,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.96, end: 1.0)
+              .animate(CurvedAnimation(parent: anim, curve: Curves.easeOutCubic)),
+          child: child,
+        ),
+      ),
+      pageBuilder: (ctx, _, _) => Center(
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            width:       600,
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.8),
+            margin:      const EdgeInsets.all(32),
+            decoration:  BoxDecoration(
+              color:        Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 40, offset: Offset(0, 12))],
+            ),
+            child: _RequestsPanel(
+              api:     _api,
+              onClose: () => Navigator.of(ctx).pop(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showStagnantPanel() {
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: Colors.black45,
+      transitionDuration: const Duration(milliseconds: 200),
+      transitionBuilder: (_, anim, _, child) => FadeTransition(
+        opacity: anim,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.96, end: 1.0)
+              .animate(CurvedAnimation(parent: anim, curve: Curves.easeOutCubic)),
+          child: child,
+        ),
+      ),
+      pageBuilder: (ctx, _, _) => Center(
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            width:       560,
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.8),
+            margin:      const EdgeInsets.all(32),
+            decoration:  BoxDecoration(
+              color:        Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 40, offset: Offset(0, 12))],
+            ),
+            child: _StagnantPanel(
+              api:     _api,
+              onClose: () => Navigator.of(ctx).pop(),
+              onTaskTap: (task) {
+                Navigator.of(ctx).pop();
+                _showTaskDetailModal(task);
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showAddTaskDialog() async {
+    // Always refresh users + types when dialog opens so dropdowns are current
+    await _loadUsers();
+    if (_taskTypeOpts.isEmpty) {
+      await _loadTaskTypes();
+    }
+    if (!mounted) return;
+    if (_users.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No users available. Check your connection.')),
+      );
+      return;
+    }
     final titleCtrl    = TextEditingController();
     final descCtrl     = TextEditingController();
-    final assigneeCtrl = TextEditingController();
     String   selectedGroup    = 'todo';
     String   selectedType     = 'Task';
     Priority selectedPriority = Priority.medium;
@@ -506,6 +671,21 @@ class _TasksScreenState extends State<TasksScreen> {
 
     final dialogTypeOpts = List<SelectOption>.from(_taskTypeOpts);
     List<String> selectedTypeIds = [];
+
+    // Build SelectOption lists for people dropdowns (from /users API)
+    // Each user's color comes from the backend (ops_users.color).
+    final personOpts = _users.map((u) => SelectOption(
+      id:    u['id'] as String,
+      name:  u['name'] as String,
+      color: _colorFromString(u['color'] as String? ?? 'gray'),
+    )).toList();
+    final reviewerOpts = _users.map((u) => SelectOption(
+      id:    u['id'] as String,
+      name:  u['name'] as String,
+      color: _colorFromString(u['color'] as String? ?? 'gray'),
+    )).toList();
+    List<String> selectedPersonIds   = [];
+    List<String> selectedReviewerIds = [];
     const border   = OutlineInputBorder(
       borderRadius: BorderRadius.all(Radius.circular(8)),
       borderSide:   BorderSide(color: _kBorder),
@@ -560,10 +740,59 @@ class _TasksScreenState extends State<TasksScreen> {
                     decoration: fieldDeco('Description'),
                   ),
                   const SizedBox(height: 12),
-                  TextField(
-                    controller: assigneeCtrl,
-                    style:      const TextStyle(fontSize: 13),
-                    decoration: fieldDeco('Assignee'),
+                  // Person (assignee)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      border:       Border.all(color: _kBorder),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: SelectOptionField(
+                      label:           'Person',
+                      options:         personOpts,
+                      selectedOptions: selectedPersonIds,
+                      onOptionSelected: (id) {
+                        setDlg(() {
+                          if (selectedPersonIds.contains(id)) {
+                            selectedPersonIds.remove(id);
+                          } else {
+                            selectedPersonIds..clear()..add(id);
+                          }
+                        });
+                      },
+                      // People come from /users — not creatable/editable here
+                      onOptionCreated:      (_) {},
+                      onOptionDeleted:      (_) {},
+                      onOptionRenamed:      (_, _) {},
+                      onOptionColorChanged: (_, _) {},
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Reviewer (captain)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      border:       Border.all(color: _kBorder),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: SelectOptionField(
+                      label:           'Reviewer',
+                      options:         reviewerOpts,
+                      selectedOptions: selectedReviewerIds,
+                      onOptionSelected: (id) {
+                        setDlg(() {
+                          if (selectedReviewerIds.contains(id)) {
+                            selectedReviewerIds.remove(id);
+                          } else {
+                            selectedReviewerIds..clear()..add(id);
+                          }
+                        });
+                      },
+                      onOptionCreated:      (_) {},
+                      onOptionDeleted:      (_) {},
+                      onOptionRenamed:      (_, _) {},
+                      onOptionColorChanged: (_, _) {},
+                    ),
                   ),
                   const SizedBox(height: 12),
                   // Priority dropdown
@@ -614,44 +843,103 @@ class _TasksScreenState extends State<TasksScreen> {
                           selectedType = opt.name;
                         });
                       },
-                      onOptionCreated: (name) {
-                        setDlg(() {
-                          final newId = '${DateTime.now().millisecondsSinceEpoch}';
-                          dialogTypeOpts.add(SelectOption(
+                      onOptionCreated: (name) async {
+                        // Call POST /tasks/types to get a real UUID
+                        const _autoColors = ['blue', 'purple', 'green', 'orange', 'pink', 'red'];
+                        final autoColor = _autoColors[dialogTypeOpts.length % _autoColors.length];
+                        try {
+                          final res = await _api.createTaskType({
+                            'name':  name,
+                            'color': autoColor,
+                          });
+                          final data = res.data as Map<String, dynamic>;
+                          final newId = data['id'] as String;
+                          final newOpt = SelectOption(
                             id:    newId,
-                            name:  name,
-                            color: SelectOptionColor.gray,
-                          ));
-                          selectedTypeIds
-                            ..clear()
-                            ..add(newId);
-                          selectedType = name;
-                        });
-                      },
-                      onOptionDeleted: (id) {
-                        setDlg(() {
-                          final removed = dialogTypeOpts.firstWhere(
-                              (o) => o.id == id,
-                              orElse: () => SelectOption(id: '', name: '', color: SelectOptionColor.gray));
-                          if (selectedType == removed.name) selectedType = '';
-                          selectedTypeIds.remove(id);
-                          dialogTypeOpts.removeWhere((o) => o.id == id);
-                        });
-                      },
-                      onOptionRenamed: (id, name) {
-                        setDlg(() {
-                          final i = dialogTypeOpts.indexWhere((o) => o.id == id);
-                          if (i != -1) {
-                            if (selectedType == dialogTypeOpts[i].name) selectedType = name;
-                            dialogTypeOpts[i] = dialogTypeOpts[i].copyWith(name: name);
+                            name:  data['name'] as String? ?? name,
+                            color: _colorFromString(data['color'] as String? ?? 'gray'),
+                          );
+                          setDlg(() {
+                            dialogTypeOpts.add(newOpt);
+                            selectedTypeIds..clear()..add(newId);
+                            selectedType = newOpt.name;
+                          });
+                          // Keep parent list in sync so next "New Task" shows it
+                          if (mounted) setState(() => _taskTypeOpts.add(newOpt));
+                        } catch (e) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Failed to create type: $e')),
+                            );
                           }
-                        });
+                        }
                       },
-                      onOptionColorChanged: (id, color) {
-                        setDlg(() {
-                          final i = dialogTypeOpts.indexWhere((o) => o.id == id);
-                          if (i != -1) dialogTypeOpts[i] = dialogTypeOpts[i].copyWith(color: color);
-                        });
+                      onOptionDeleted: (id) async {
+                        try {
+                          await _api.deleteTaskType(id);
+                          setDlg(() {
+                            final removed = dialogTypeOpts.firstWhere(
+                                (o) => o.id == id,
+                                orElse: () => SelectOption(id: '', name: '', color: SelectOptionColor.gray));
+                            if (selectedType == removed.name) selectedType = '';
+                            selectedTypeIds.remove(id);
+                            dialogTypeOpts.removeWhere((o) => o.id == id);
+                          });
+                          if (mounted) {
+                            setState(() => _taskTypeOpts.removeWhere((o) => o.id == id));
+                          }
+                        } catch (e) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Failed to delete type: $e')),
+                            );
+                          }
+                        }
+                      },
+                      onOptionRenamed: (id, name) async {
+                        try {
+                          await _api.updateTaskType(id, {'name': name});
+                          setDlg(() {
+                            final i = dialogTypeOpts.indexWhere((o) => o.id == id);
+                            if (i != -1) {
+                              if (selectedType == dialogTypeOpts[i].name) selectedType = name;
+                              dialogTypeOpts[i] = dialogTypeOpts[i].copyWith(name: name);
+                            }
+                          });
+                          if (mounted) {
+                            setState(() {
+                              final i = _taskTypeOpts.indexWhere((o) => o.id == id);
+                              if (i != -1) _taskTypeOpts[i] = _taskTypeOpts[i].copyWith(name: name);
+                            });
+                          }
+                        } catch (e) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Failed to rename type: $e')),
+                            );
+                          }
+                        }
+                      },
+                      onOptionColorChanged: (id, color) async {
+                        try {
+                          await _api.updateTaskType(id, {'color': _stringFromColor(color)});
+                          setDlg(() {
+                            final i = dialogTypeOpts.indexWhere((o) => o.id == id);
+                            if (i != -1) dialogTypeOpts[i] = dialogTypeOpts[i].copyWith(color: color);
+                          });
+                          if (mounted) {
+                            setState(() {
+                              final i = _taskTypeOpts.indexWhere((o) => o.id == id);
+                              if (i != -1) _taskTypeOpts[i] = _taskTypeOpts[i].copyWith(color: color);
+                            });
+                          }
+                        } catch (e) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Failed to update type color: $e')),
+                            );
+                          }
+                        }
                       },
                     ),
                   ),
@@ -683,7 +971,7 @@ class _TasksScreenState extends State<TasksScreen> {
                           borderRadius: BorderRadius.circular(8),
                           onTap: () => setDlg(() => showCalendar = !showCalendar),
                           child: InputDecorator(
-                            decoration: fieldDeco('Due Date'),
+                            decoration: fieldDeco('Date'),
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -761,7 +1049,7 @@ class _TasksScreenState extends State<TasksScreen> {
           final data = <String, dynamic>{
             'title':        title,
             'description':  descCtrl.text.trim(),
-            'priority':     selectedPriority.name,
+            'priority':     selectedPriority.apiValue,
             'column_group': TaskItem.groupToColumn(selectedGroup),
           };
           if (selectedDate != null) {
@@ -773,15 +1061,36 @@ class _TasksScreenState extends State<TasksScreen> {
           if (selectedTypeIds.isNotEmpty) {
             data['type_ids'] = selectedTypeIds;
           }
+          if (selectedPersonIds.isNotEmpty) {
+            data['person_id'] = selectedPersonIds.first;
+          }
+          if (selectedReviewerIds.isNotEmpty) {
+            data['reviewer_id'] = selectedReviewerIds.first;
+          }
           await _api.createTask(data);
           await _loadTasks();
-        } catch (_) {
-          // Silently fail — task not created
+        } on DioException catch (e) {
+          // Extract the backend's actual error message from {error: "..."}
+          final backendMsg = e.response?.data is Map
+              ? (e.response!.data as Map)['error']?.toString()
+              : null;
+          final msg = backendMsg ?? 'Failed to create task (${e.response?.statusCode ?? 'network error'})';
+          debugPrint('[Tasks] createTask failed: $msg | full response: ${e.response?.data}');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(msg), backgroundColor: Colors.red[700]),
+            );
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Failed to create task: $e')),
+            );
+          }
         }
       }
       titleCtrl.dispose();
       descCtrl.dispose();
-      assigneeCtrl.dispose();
     });
   }
 }
@@ -789,8 +1098,10 @@ class _TasksScreenState extends State<TasksScreen> {
 // ─── Reusable: Top bar ────────────────────────────────────────────────────────
 
 class _TopBar extends StatelessWidget {
-  final VoidCallback onAddTask;
-  const _TopBar({required this.onAddTask});
+  final VoidCallback  onAddTask;
+  final VoidCallback? onStagnant;  // null = not shown (non-admin)
+  final VoidCallback? onRequests;  // null = not shown (non-admin/reviewer)
+  const _TopBar({required this.onAddTask, this.onStagnant, this.onRequests});
 
   @override
   Widget build(BuildContext context) {
@@ -804,7 +1115,38 @@ class _TopBar extends StatelessWidget {
                   fontWeight: FontWeight.bold,
                   color: _kPrimary)),
           const Spacer(),
-          // Add task button
+          if (onRequests != null) ...[
+            OutlinedButton.icon(
+              onPressed: onRequests,
+              icon:  const Icon(Icons.inbox_rounded, size: 14),
+              label: const Text('Requests', style: TextStyle(fontSize: 13)),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF6366F1),
+                side: const BorderSide(color: Color(0xFF6366F1)),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                minimumSize:   Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+            const SizedBox(width: 10),
+          ],
+          if (onStagnant != null) ...[
+            OutlinedButton.icon(
+              onPressed: onStagnant,
+              icon:  const Icon(Icons.warning_amber_rounded, size: 14),
+              label: const Text('Stagnant', style: TextStyle(fontSize: 13)),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFFF97316),
+                side: const BorderSide(color: Color(0xFFF97316)),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                minimumSize:   Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+            const SizedBox(width: 10),
+          ],
           FilledButton.icon(
             onPressed: onAddTask,
             icon:  const Icon(Icons.add, size: 16),
@@ -829,100 +1171,146 @@ class _TopBar extends StatelessWidget {
 
 class _TaskFilterBar extends StatelessWidget {
   final String?   filterPerson;
+  final String?   filterReviewer;
   final String?   filterType;
   final Priority? filterPriority;
-  final bool?     filterDone;
-  final Set<String> assignees;
-  final Set<String> types;
+  final String?   filterStatus;
+  final String?   filterHealth;
+  final List<Map<String, dynamic>> users;
+  final List<SelectOption>         taskTypes;
   final bool      hasActive;
   final ValueChanged<String?>   onPersonChanged;
+  final ValueChanged<String?>   onReviewerChanged;
   final ValueChanged<String?>   onTypeChanged;
   final ValueChanged<Priority?> onPriorityChanged;
-  final ValueChanged<bool?>     onDoneChanged;
+  final ValueChanged<String?>   onStatusChanged;
+  final ValueChanged<String?>   onHealthChanged;
   final VoidCallback            onClearAll;
 
   const _TaskFilterBar({
     required this.filterPerson,
+    required this.filterReviewer,
     required this.filterType,
     required this.filterPriority,
-    required this.filterDone,
-    required this.assignees,
-    required this.types,
+    required this.filterStatus,
+    required this.filterHealth,
+    required this.users,
+    required this.taskTypes,
     required this.hasActive,
     required this.onPersonChanged,
+    required this.onReviewerChanged,
     required this.onTypeChanged,
     required this.onPriorityChanged,
-    required this.onDoneChanged,
+    required this.onStatusChanged,
+    required this.onHealthChanged,
     required this.onClearAll,
   });
 
   @override
   Widget build(BuildContext context) {
+    final userItems = users
+        .map((u) => MapEntry(u['id'] as String, u['name'] as String))
+        .toList();
+    final typeItems = taskTypes
+        .map((t) => MapEntry(t.id, t.name))
+        .toList();
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-      child: Row(children: [
-        const Icon(Icons.filter_list_rounded, size: 15, color: _kMuted),
-        const SizedBox(width: 6),
-        const Text('Filter',
-            style: TextStyle(fontSize: 12, color: _kMuted, fontWeight: FontWeight.w500)),
-        const SizedBox(width: 10),
-
-        // Person
-        _FilterDropdown<String>(
-          label:    'Person',
-          value:    filterPerson,
-          items:    assignees.map((a) => MapEntry(a, a)).toList(),
-          onChanged: onPersonChanged,
-        ),
-        const SizedBox(width: 6),
-
-        // Type
-        _FilterDropdown<String>(
-          label:    'Type',
-          value:    filterType,
-          items:    types.map((t) => MapEntry(t, t)).toList(),
-          onChanged: onTypeChanged,
-        ),
-        const SizedBox(width: 6),
-
-        // Priority
-        _FilterDropdown<Priority>(
-          label: 'Priority',
-          value: filterPriority,
-          items: Priority.values.map((p) => MapEntry(p, p.label)).toList(),
-          onChanged: onPriorityChanged,
-        ),
-        const SizedBox(width: 6),
-
-        // Done
-        _FilterDropdown<bool>(
-          label: 'Done',
-          value: filterDone,
-          items: const [MapEntry(true, 'Yes'), MapEntry(false, 'No')],
-          onChanged: onDoneChanged,
-        ),
-
-        // Clear all
-        if (hasActive) ...[
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(children: [
+          const Icon(Icons.filter_list_rounded, size: 15, color: _kMuted),
+          const SizedBox(width: 6),
+          const Text('Filter',
+              style: TextStyle(fontSize: 12, color: _kMuted, fontWeight: FontWeight.w500)),
           const SizedBox(width: 10),
-          GestureDetector(
-            onTap: onClearAll,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color:        _kAccent.withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.close, size: 11, color: _kAccent),
-                const SizedBox(width: 3),
-                Text('Clear',
-                    style: TextStyle(fontSize: 11, color: _kAccent, fontWeight: FontWeight.w500)),
-              ]),
-            ),
+
+          // Person (assignee)
+          _FilterDropdown<String>(
+            label:    'Person',
+            value:    filterPerson,
+            items:    userItems,
+            onChanged: onPersonChanged,
           ),
-        ],
-      ]),
+          const SizedBox(width: 6),
+
+          // Reviewer
+          _FilterDropdown<String>(
+            label:    'Reviewer',
+            value:    filterReviewer,
+            items:    userItems,
+            onChanged: onReviewerChanged,
+          ),
+          const SizedBox(width: 6),
+
+          // Type
+          _FilterDropdown<String>(
+            label:    'Type',
+            value:    filterType,
+            items:    typeItems,
+            onChanged: onTypeChanged,
+          ),
+          const SizedBox(width: 6),
+
+          // Priority
+          _FilterDropdown<Priority>(
+            label: 'Priority',
+            value: filterPriority,
+            items: Priority.values.map((p) => MapEntry(p, p.label)).toList(),
+            onChanged: onPriorityChanged,
+          ),
+          const SizedBox(width: 6),
+
+          // Status
+          _FilterDropdown<String>(
+            label: 'Status',
+            value: filterStatus,
+            items: const [
+              MapEntry('not_completed', 'Not Completed'),
+              MapEntry('reviewer',      'In Review'),
+              MapEntry('completed',     'Completed'),
+              MapEntry('idea',          'Idea'),
+            ],
+            onChanged: onStatusChanged,
+          ),
+          const SizedBox(width: 6),
+
+          // Health
+          _FilterDropdown<String>(
+            label: 'Health',
+            value: filterHealth,
+            items: const [
+              MapEntry('active',   'Active'),
+              MapEntry('at_risk',  'At Risk'),
+              MapEntry('stagnant', 'Stagnant'),
+              MapEntry('dead',     'Dead'),
+            ],
+            onChanged: onHealthChanged,
+          ),
+
+          // Clear all
+          if (hasActive) ...[
+            const SizedBox(width: 10),
+            GestureDetector(
+              onTap: onClearAll,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color:        _kAccent.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.close, size: 11, color: _kAccent),
+                  const SizedBox(width: 3),
+                  Text('Clear',
+                      style: TextStyle(fontSize: 11, color: _kAccent, fontWeight: FontWeight.w500)),
+                ]),
+              ),
+            ),
+          ],
+        ]),
+      ),
     );
   }
 }
@@ -1145,6 +1533,39 @@ class _AssigneeAvatar extends StatelessWidget {
 
 // ─── Reusable: Meta chip (date / comment count) ───────────────────────────────
 
+class _HealthDot extends StatelessWidget {
+  final String health;
+  const _HealthDot(this.health);
+
+  static Color _color(String h) => switch (h) {
+    'active'   => Color(0xFF10B981),
+    'at_risk'  => Color(0xFFF59E0B),
+    'stagnant' => Color(0xFFF97316),
+    'dead'     => Color(0xFFEF4444),
+    _          => Color(0xFF9CA3AF),
+  };
+
+  static String _label(String h) => switch (h) {
+    'active'   => 'Active',
+    'at_risk'  => 'At Risk',
+    'stagnant' => 'Stagnant',
+    'dead'     => 'Dead',
+    _          => h,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _color(health);
+    return Tooltip(
+      message: _label(health),
+      child: Container(
+        width: 8, height: 8,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+    );
+  }
+}
+
 class _MetaChip extends StatelessWidget {
   final IconData icon;
   final String   text;
@@ -1184,7 +1605,7 @@ class _TaskCard extends StatelessWidget {
         margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color:        _kSurface,          // pure white card
+          color:        item.isPaused ? const Color(0xFFF9FAFB) : _kSurface,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: isSelected ? _kAccent : _kBorder,
@@ -1201,13 +1622,22 @@ class _TaskCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Row 1: priority badge + type badge ────────────────────────
+            // ── Row 1: priority badge + type badge + health dot ───────────
             Row(
               children: [
                 _PriorityBadge(item.priority),
                 const SizedBox(width: 6),
                 _TypeBadge(item.type),
                 const Spacer(),
+                if (item.isPaused) ...[
+                  const Icon(Icons.pause_circle_outline_rounded,
+                      size: 14, color: Color(0xFF9CA3AF)),
+                  const SizedBox(width: 6),
+                ],
+                if (item.health != null && item.status == 'not_completed' && !item.isPaused) ...[
+                  _HealthDot(item.health!),
+                  const SizedBox(width: 6),
+                ],
                 if (item.isDone)
                   const Icon(Icons.check_circle_rounded,
                       size: 14, color: _kDone),
@@ -1238,13 +1668,20 @@ class _TaskCard extends StatelessWidget {
             const SizedBox(height: 10),
             const Divider(height: 1, color: _kBorder),
             const SizedBox(height: 10),
-            // ── Row 4: assignee + meta chips ──────────────────────────────
+            // ── Row 4: assignee + reviewer + meta chips ───────────────────
             Row(
               children: [
                 if (item.assignee.isNotEmpty) ...[
                   _AssigneeAvatar(item.assignee),
                   const SizedBox(width: 5),
                   Text(item.assignee,
+                      style: const TextStyle(fontSize: 11, color: _kMuted)),
+                ],
+                if (item.reviewerName != null && item.reviewerName!.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  const Icon(Icons.shield_outlined, size: 11, color: _kMuted),
+                  const SizedBox(width: 3),
+                  Text(item.reviewerName!,
                       style: const TextStyle(fontSize: 11, color: _kMuted)),
                 ],
                 const Spacer(),
@@ -1297,6 +1734,27 @@ class _PanelRow extends StatelessWidget {
 
 // ─── Reusable: Comment bubble ─────────────────────────────────────────────────
 
+class _ActivityLogEntry extends StatelessWidget {
+  final String text;
+  const _ActivityLogEntry({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(children: [
+        const Expanded(child: Divider(color: Color(0xFFE8ECF3))),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Text(text,
+              style: const TextStyle(fontSize: 11, color: Color(0xFF9CA3AF))),
+        ),
+        const Expanded(child: Divider(color: Color(0xFFE8ECF3))),
+      ]),
+    );
+  }
+}
+
 class _CommentBubble extends StatelessWidget {
   final String text;
   final String? author;
@@ -1337,13 +1795,15 @@ class _TaskDetailPanel extends StatefulWidget {
   final VoidCallback onClose;
   final VoidCallback onChanged;
   final List<SelectOption> typeOptions;
+  final String? currentUserId;
 
   const _TaskDetailPanel({
     super.key,
     required this.item,
     required this.onClose,
     required this.onChanged,
-    this.typeOptions = const [],
+    this.typeOptions    = const [],
+    this.currentUserId,
   });
 
   @override
@@ -1356,17 +1816,398 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   final _commentCtrl      = TextEditingController();
   final _dateRowKey       = GlobalKey();
   OverlayEntry? _dateOverlay;
-  bool _endDateEnabled    = false;
+  late bool _endDateEnabled = widget.item.endDate != null;
+  Timer? _debounce;
 
   late final List<SelectOption> _typeOpts = List<SelectOption>.from(widget.typeOptions);
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _closeDateOverlay();
     _titleCtrl.dispose();
     _descCtrl.dispose();
     _commentCtrl.dispose();
     super.dispose();
+  }
+
+  // Save immediately
+  Future<void> _saveField(Map<String, dynamic> data) async {
+    final id = widget.item.backendId;
+    if (id == null) return;
+    try {
+      await context.read<ApiClient>().updateTask(id, data);
+    } catch (_) {
+      // silent — user sees their change; they can retry if needed
+    }
+  }
+
+  // Save after 600 ms of inactivity (for text fields)
+  void _saveLater(Map<String, dynamic> data) {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 600), () => _saveField(data));
+  }
+
+  // Build the status action widget:
+  //   not_completed → "Submit for Review" button
+  //   reviewer      → pending pill + note
+  //   completed     → green completed pill
+  Widget _buildStatusAction(TaskItem item) {
+    switch (item.status) {
+      case 'reviewer':
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color:        const Color(0xFFFFF7E8),
+            borderRadius: BorderRadius.circular(4),
+            border:       Border.all(color: const Color(0xFFF59E0B)),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: const [
+            Icon(Icons.hourglass_top_rounded, size: 12, color: Color(0xFFF59E0B)),
+            SizedBox(width: 4),
+            Text('In Review',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFF59E0B))),
+          ]),
+        );
+
+      case 'completed':
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color:        const Color(0xFFE8FFF0),
+            borderRadius: BorderRadius.circular(4),
+            border:       Border.all(color: _kDone),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: const [
+            Icon(Icons.check_circle_rounded, size: 12, color: _kDone),
+            SizedBox(width: 4),
+            Text('Completed',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _kDone)),
+          ]),
+        );
+
+      default:
+        // not_completed → show Submit button
+        return Material(
+          color:        _kAccent,
+          borderRadius: BorderRadius.circular(6),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: _submitForReview,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.send_rounded, size: 12, color: Colors.white),
+                SizedBox(width: 6),
+                Text('Submit for Review',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white)),
+              ]),
+            ),
+          ),
+        );
+    }
+  }
+
+  Future<void> _submitForReview() async {
+    final item = widget.item;
+    final api = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+
+    // Optimistic update
+    setState(() => item.status = 'reviewer');
+    try {
+      await api.changeTaskStatus(item.id, 'reviewer');
+      widget.onChanged();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => item.status = 'not_completed');
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Failed to submit for review')),
+      );
+    }
+  }
+
+  Widget _buildPauseResumeButton(TaskItem item) {
+    if (item.isPaused) {
+      return Material(
+        color:        const Color(0xFF10B981),
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: _resumeTask,
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.play_arrow_rounded, size: 12, color: Colors.white),
+              SizedBox(width: 6),
+              Text('Resume', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white)),
+            ]),
+          ),
+        ),
+      );
+    }
+    final req            = item.pendingPauseRequest;
+    final currentUserId  = widget.currentUserId;
+    final isReviewer     = item.reviewerId != null && item.reviewerId == currentUserId;
+
+    if (req != null) {
+      if (isReviewer) {
+        // Reviewer sees Approve / Deny buttons
+        final reqId = req['id'] as String;
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          OutlinedButton(
+            onPressed: () => _reviewPauseRequest(reqId, 'denied'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _kAccent,
+              side: const BorderSide(color: _kAccent),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+            ),
+            child: const Text('Deny Pause', style: TextStyle(fontSize: 11)),
+          ),
+          const SizedBox(width: 6),
+          FilledButton(
+            onPressed: () => _reviewPauseRequest(reqId, 'approved'),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF10B981),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+            ),
+            child: const Text('Approve Pause', style: TextStyle(fontSize: 11)),
+          ),
+        ]);
+      }
+      // Assignee — show locked "Pause Requested" pill
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color:        const Color(0xFFFFF7E8),
+          borderRadius: BorderRadius.circular(6),
+          border:       Border.all(color: const Color(0xFFF59E0B)),
+        ),
+        child: const Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.hourglass_top_rounded, size: 12, color: Color(0xFFF59E0B)),
+          SizedBox(width: 6),
+          Text('Pause Requested',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFF59E0B))),
+        ]),
+      );
+    }
+    // No pending request — show Pause button for assignee
+    return Material(
+      color:        const Color(0xFFF3F4F6),
+      borderRadius: BorderRadius.circular(6),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: _showPauseDialog,
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.pause_rounded, size: 12, color: Color(0xFF6B7280)),
+            SizedBox(width: 6),
+            Text('Pause', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF6B7280))),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _reviewPauseRequest(String requestId, String status) async {
+    final item = widget.item;
+    try {
+      await context.read<ApiClient>().reviewPauseRequest(requestId, status);
+      setState(() {
+        item.pendingPauseRequest = null;
+        if (status == 'approved') item.isPaused = true;
+      });
+      widget.onChanged();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to $status pause request')),
+      );
+    }
+  }
+
+  Future<void> _showPauseDialog() async {
+    String selectedReason = 'blocked';
+    final noteCtrl = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          title: const Text('Pause Task', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Reason', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+              const SizedBox(height: 6),
+              DropdownButtonFormField<String>(
+                value: selectedReason,
+                decoration: InputDecoration(
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'priority_shift', child: Text('Priority Shift', style: TextStyle(fontSize: 13))),
+                  DropdownMenuItem(value: 'blocked',        child: Text('Blocked',        style: TextStyle(fontSize: 13))),
+                  DropdownMenuItem(value: 'need_info',      child: Text('Need Info',      style: TextStyle(fontSize: 13))),
+                  DropdownMenuItem(value: 'other',          child: Text('Other',          style: TextStyle(fontSize: 13))),
+                ],
+                onChanged: (v) { if (v != null) setDlg(() => selectedReason = v); },
+              ),
+              const SizedBox(height: 12),
+              const Text('Note (optional)', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+              const SizedBox(height: 6),
+              TextField(
+                controller: noteCtrl,
+                maxLines: 2,
+                style: const TextStyle(fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: 'e.g. waiting for design files…',
+                  hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Pause')),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final api = context.read<ApiClient>();
+    final item = widget.item;
+    final note = noteCtrl.text.trim().isEmpty ? null : noteCtrl.text.trim();
+    noteCtrl.dispose();
+    setState(() => item.pendingPauseRequest = {'id': '', 'reason': selectedReason});
+    try {
+      final res = await api.pauseTask(item.backendId!, selectedReason, note: note);
+      // Update with real request id from response if available
+      final data = res.data;
+      if (data is Map<String, dynamic>) {
+        setState(() => item.pendingPauseRequest = data);
+      }
+      widget.onChanged();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Pause request sent — waiting for reviewer approval')),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => item.pendingPauseRequest = null);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to send pause request')));
+    }
+  }
+
+  Future<void> _resumeTask() async {
+    final api = context.read<ApiClient>();
+    final item = widget.item;
+    setState(() => item.isPaused = false);
+    try {
+      await api.resumeTask(item.backendId!);
+      widget.onChanged();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => item.isPaused = true);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to resume task')));
+    }
+  }
+
+  Widget _buildMoveToIdeaButton(TaskItem item) {
+    return Material(
+      color:        const Color(0xFFF5F3FF),
+      borderRadius: BorderRadius.circular(6),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: () => _showMoveToIdeaDialog(item),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.lightbulb_outline_rounded, size: 12, color: Color(0xFF8B5CF6)),
+            SizedBox(width: 6),
+            Text('Move to Idea',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF8B5CF6))),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showMoveToIdeaDialog(TaskItem item) async {
+    final reasonCtrl = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Move to Idea', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Explain why this task should move to the idea stage. A reviewer will approve or deny your request.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF6B7280), height: 1.5),
+            ),
+            const SizedBox(height: 12),
+            const Text('Reason', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+            const SizedBox(height: 6),
+            TextField(
+              controller: reasonCtrl,
+              maxLines: 3,
+              autofocus: true,
+              style: const TextStyle(fontSize: 13),
+              decoration: InputDecoration(
+                hintText: 'e.g. Less relevant after the pivot…',
+                hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Send Request')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final reason = reasonCtrl.text.trim();
+    reasonCtrl.dispose();
+    if (reason.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a reason')),
+      );
+      return;
+    }
+    try {
+      final res = await context.read<ApiClient>().requestIdeaMove(item.backendId!, reason);
+      if (!mounted) return;
+      final data = res.data as Map<String, dynamic>;
+      final used      = data['moves_used_this_month'] as int? ?? 0;
+      final remaining = data['moves_remaining'] as int? ?? 0;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Request sent — $used/3 moves used this month, $remaining remaining')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      // Surface the backend error message (e.g. "You have used all 3 idea moves")
+      final msg = (e is Exception) ? e.toString() : 'Failed to send idea request';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
   }
 
   void _openDateOverlay() {
@@ -1388,11 +2229,13 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
         setState(() { item.date = d; item.endDate = null; });
         widget.onChanged();
         _dateOverlay?.markNeedsBuild();
+        _saveField({'date': d.toIso8601String().substring(0, 10), 'end_date': null});
       },
       onEndSelect: (d) {
         setState(() => item.endDate = d);
         widget.onChanged();
         _dateOverlay?.markNeedsBuild();
+        _saveField({'end_date': d.toIso8601String().substring(0, 10)});
       },
       onEndDateToggle: (v) {
         setState(() { _endDateEnabled = v; if (!v) item.endDate = null; });
@@ -1464,6 +2307,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   onChanged: (v) {
                     item.title = v;
                     widget.onChanged();
+                    _saveLater({'title': v});
                   },
                 ),
                 const SizedBox(height: 4),
@@ -1487,27 +2331,31 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   onChanged: (v) {
                     item.description = v;
                     widget.onChanged();
+                    _saveLater({'description': v});
                   },
                 ),
 
                 const Divider(height: 28, color: _kBorder),
 
-                // ── Done checkbox ──────────────────────────────────────────
+                // ── Status row: shows current state + submit-for-review button ───
                 _PanelRow(
                   icon:  Icons.check_circle_outline_rounded,
-                  label: 'Done',
-                  child: Transform.scale(
-                    scale:     0.8,
-                    alignment: Alignment.centerLeft,
-                    child: Checkbox(
-                      value:       item.isDone,
-                      activeColor: _kDone,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      onChanged: (v) {
-                        setState(() => item.isDone = v ?? false);
-                        widget.onChanged();
-                      },
-                    ),
+                  label: 'Status',
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: [
+                      _buildStatusAction(item),
+                      if (item.status != 'completed' && item.status != 'idea' &&
+                          (item.isPaused || item.pendingPauseRequest != null ||
+                           item.personId == widget.currentUserId ||
+                           item.reviewerId == widget.currentUserId))
+                        _buildPauseResumeButton(item),
+                      if (item.status == 'not_completed' &&
+                          item.createdBy != null &&
+                          item.createdBy == widget.currentUserId)
+                        _buildMoveToIdeaButton(item),
+                    ],
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -1537,6 +2385,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                       if (v != null) {
                         setState(() => item.priority = v);
                         widget.onChanged();
+                        _saveField({'priority': v.apiValue});
                       }
                     },
                   ),
@@ -1548,7 +2397,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   key: _dateRowKey,
                   child: _PanelRow(
                     icon:  Icons.calendar_today_outlined,
-                    label: 'Due date',
+                    label: 'Date',
                     child: GestureDetector(
                       onTap: _openDateOverlay,
                       child: Row(children: [
@@ -1586,6 +2435,23 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                           _AssigneeAvatar(item.assignee, radius: 12),
                           const SizedBox(width: 8),
                           Text(item.assignee,
+                              style: const TextStyle(
+                                  fontSize: 12, color: _kPrimary)),
+                        ]),
+                ),
+                const SizedBox(height: 14),
+
+                // ── Reviewer (Captain) ─────────────────────────────────────
+                _PanelRow(
+                  icon:  Icons.verified_user_outlined,
+                  label: 'Captain',
+                  child: (item.reviewerName == null || item.reviewerName!.isEmpty)
+                      ? const Text('None',
+                          style: TextStyle(fontSize: 12, color: _kMuted))
+                      : Row(children: [
+                          _AssigneeAvatar(item.reviewerName!, radius: 12),
+                          const SizedBox(width: 8),
+                          Text(item.reviewerName!,
                               style: const TextStyle(
                                   fontSize: 12, color: _kPrimary)),
                         ]),
@@ -1674,10 +2540,16 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   const Text('No comments yet',
                       style: TextStyle(fontSize: 12, color: _kMuted))
                 else
-                  ...item.commentsList.map((c) => _CommentBubble(
-                    text: c['text'] as String? ?? '',
-                    author: c['user_name'] as String?,
-                  )),
+                  ...item.commentsList.map((c) {
+                    final isSystem = c['is_system'] as bool? ?? false;
+                    if (isSystem) {
+                      return _ActivityLogEntry(text: c['text'] as String? ?? '');
+                    }
+                    return _CommentBubble(
+                      text:   c['text'] as String? ?? '',
+                      author: c['user_name'] as String?,
+                    );
+                  }),
                 const SizedBox(height: 10),
                 // Add comment
                 Row(children: [
@@ -1768,6 +2640,370 @@ String _fmtDateLong(DateTime d) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun',
                    'Jul','Aug','Sep','Oct','Nov','Dec'];
   return '${months[d.month - 1]} ${d.day.toString().padLeft(2, '0')}, ${d.year}';
+}
+
+// ─── Pending requests panel (pause + idea) ────────────────────────────────────
+
+class _RequestsPanel extends StatefulWidget {
+  final ApiClient    api;
+  final VoidCallback onClose;
+  const _RequestsPanel({required this.api, required this.onClose});
+
+  @override
+  State<_RequestsPanel> createState() => _RequestsPanelState();
+}
+
+class _RequestsPanelState extends State<_RequestsPanel> with SingleTickerProviderStateMixin {
+  late final TabController _tab = TabController(length: 2, vsync: this);
+  bool _loadingPause = true;
+  bool _loadingIdea  = true;
+  List<Map<String, dynamic>> _pauseRequests = [];
+  List<Map<String, dynamic>> _ideaRequests  = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPause();
+    _loadIdea();
+  }
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadPause() async {
+    setState(() => _loadingPause = true);
+    try {
+      final res = await widget.api.getPauseRequests(status: 'pending');
+      _pauseRequests = (res.data as List).cast<Map<String, dynamic>>();
+    } catch (_) { _pauseRequests = []; }
+    if (mounted) setState(() => _loadingPause = false);
+  }
+
+  Future<void> _loadIdea() async {
+    setState(() => _loadingIdea = true);
+    try {
+      final res = await widget.api.getIdeaRequests(status: 'pending');
+      _ideaRequests = (res.data as List).cast<Map<String, dynamic>>();
+    } catch (_) { _ideaRequests = []; }
+    if (mounted) setState(() => _loadingIdea = false);
+  }
+
+  Future<void> _reviewPause(String id, String status) async {
+    try {
+      await widget.api.reviewPauseRequest(id, status);
+      _loadPause();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to $status pause request')),
+        );
+      }
+    }
+  }
+
+  Future<void> _reviewIdea(String id, String status) async {
+    try {
+      await widget.api.reviewIdeaRequest(id, status);
+      _loadIdea();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to $status idea request')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Header
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 12, 0),
+          child: Row(children: [
+            const Icon(Icons.inbox_rounded, size: 16, color: Color(0xFF6366F1)),
+            const SizedBox(width: 8),
+            const Text('Pending Requests',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: _kPrimary)),
+            const Spacer(),
+            IconButton(
+              onPressed: widget.onClose,
+              icon: const Icon(Icons.close, size: 16, color: _kMuted),
+              padding: EdgeInsets.zero, constraints: const BoxConstraints(),
+            ),
+          ]),
+        ),
+        TabBar(
+          controller: _tab,
+          labelStyle:         const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 13),
+          indicatorColor: const Color(0xFF6366F1),
+          labelColor:     const Color(0xFF6366F1),
+          unselectedLabelColor: _kMuted,
+          tabs: const [Tab(text: 'Pause'), Tab(text: 'Idea Move')],
+        ),
+        const Divider(height: 1, color: _kBorder),
+        Flexible(
+          child: TabBarView(
+            controller: _tab,
+            children: [
+              _requestList(
+                loading:  _loadingPause,
+                items:    _pauseRequests,
+                titleKey: 'task_title',
+                subtitleBuilder: (r) =>
+                    'By ${r['requested_by_name'] ?? ''} — ${r['reason'] ?? ''}',
+                onApprove: (id) => _reviewPause(id, 'approved'),
+                onDeny:    (id) => _reviewPause(id, 'denied'),
+              ),
+              _requestList(
+                loading:  _loadingIdea,
+                items:    _ideaRequests,
+                titleKey: 'task_title',
+                subtitleBuilder: (r) =>
+                    'By ${r['requested_by_name'] ?? ''} — ${r['reason'] ?? ''}',
+                onApprove: (id) => _reviewIdea(id, 'approved'),
+                onDeny:    (id) => _reviewIdea(id, 'denied'),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _requestList({
+    required bool loading,
+    required List<Map<String, dynamic>> items,
+    required String titleKey,
+    required String Function(Map<String, dynamic>) subtitleBuilder,
+    required void Function(String) onApprove,
+    required void Function(String) onDeny,
+  }) {
+    if (loading) {
+      return const Center(child: Padding(
+        padding: EdgeInsets.all(32),
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ));
+    }
+    if (items.isEmpty) {
+      return const Center(child: Padding(
+        padding: EdgeInsets.all(32),
+        child: Text('No pending requests', style: TextStyle(fontSize: 13, color: _kMuted)),
+      ));
+    }
+    return ListView.separated(
+      shrinkWrap: true,
+      itemCount: items.length,
+      separatorBuilder: (_, _) => const Divider(height: 1, color: _kBorder),
+      itemBuilder: (_, i) {
+        final r  = items[i];
+        final id = r['id'] as String;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(r[titleKey] as String? ?? '',
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary)),
+                  const SizedBox(height: 2),
+                  Text(subtitleBuilder(r),
+                      style: const TextStyle(fontSize: 11, color: _kMuted),
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            OutlinedButton(
+              onPressed: () => onDeny(id),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: _kAccent,
+                side: const BorderSide(color: _kAccent),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+              ),
+              child: const Text('Deny', style: TextStyle(fontSize: 12)),
+            ),
+            const SizedBox(width: 6),
+            FilledButton(
+              onPressed: () => onApprove(id),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF10B981),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+              ),
+              child: const Text('Approve', style: TextStyle(fontSize: 12)),
+            ),
+          ]),
+        );
+      },
+    );
+  }
+}
+
+// ─── Stagnant tasks panel ─────────────────────────────────────────────────────
+
+class _StagnantPanel extends StatefulWidget {
+  final ApiClient                        api;
+  final VoidCallback                     onClose;
+  final void Function(TaskItem task)     onTaskTap;
+  const _StagnantPanel({required this.api, required this.onClose, required this.onTaskTap});
+
+  @override
+  State<_StagnantPanel> createState() => _StagnantPanelState();
+}
+
+class _StagnantPanelState extends State<_StagnantPanel> {
+  bool   _loading = true;
+  String _filter  = '';   // '' | 'at_risk' | 'stagnant' | 'dead'
+  List<Map<String, dynamic>> _tasks = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final res  = await widget.api.getStagnantTasks(health: _filter.isEmpty ? null : _filter);
+      _tasks = (res.data as List).cast<Map<String, dynamic>>();
+    } catch (_) {
+      _tasks = [];
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Color _healthColor(String? h) => switch (h) {
+    'at_risk'  => const Color(0xFFF59E0B),
+    'stagnant' => const Color(0xFFF97316),
+    'dead'     => const Color(0xFFEF4444),
+    _          => const Color(0xFF9CA3AF),
+  };
+
+  String _healthLabel(String? h) => switch (h) {
+    'at_risk'  => 'At Risk',
+    'stagnant' => 'Stagnant',
+    'dead'     => 'Dead',
+    _          => h ?? '',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Header
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 12, 10),
+          child: Row(children: [
+            const Icon(Icons.warning_amber_rounded, size: 16, color: Color(0xFFF97316)),
+            const SizedBox(width: 8),
+            const Text('Stagnant Tasks',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: _kPrimary)),
+            const Spacer(),
+            IconButton(
+              onPressed: widget.onClose,
+              icon: const Icon(Icons.close, size: 16, color: _kMuted),
+              padding: EdgeInsets.zero, constraints: const BoxConstraints(),
+            ),
+          ]),
+        ),
+        // Filter chips
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          child: Row(children: [
+            for (final f in [('', 'All'), ('at_risk', 'At Risk'), ('stagnant', 'Stagnant'), ('dead', 'Dead')])
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ChoiceChip(
+                  label: Text(f.$2, style: const TextStyle(fontSize: 11)),
+                  selected: _filter == f.$1,
+                  onSelected: (_) { setState(() => _filter = f.$1); _load(); },
+                  selectedColor: _filter == f.$1 ? const Color(0xFFF97316) : null,
+                  labelStyle: TextStyle(
+                    color: _filter == f.$1 ? Colors.white : _kMuted,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 0),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+          ]),
+        ),
+        const Divider(height: 1, color: _kBorder),
+        // List
+        Flexible(
+          child: _loading
+              ? const Center(child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ))
+              : _tasks.isEmpty
+                  ? const Center(child: Padding(
+                      padding: EdgeInsets.all(32),
+                      child: Text('No stagnant tasks 🎉',
+                          style: TextStyle(fontSize: 13, color: _kMuted)),
+                    ))
+                  : ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: _tasks.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1, color: _kBorder),
+                      itemBuilder: (_, i) {
+                        final t = _tasks[i];
+                        final health   = t['health'] as String?;
+                        final days     = t['days_inactive'] as int? ?? 0;
+                        final assignees = (t['assignees'] as List?)
+                            ?.cast<Map<String, dynamic>>()
+                            .map((a) => a['name'] as String)
+                            .join(', ') ?? '';
+                        final color = _healthColor(health);
+                        return ListTile(
+                          dense: true,
+                          onTap: () {
+                            final item = TaskItem.fromJson(t);
+                            widget.onTaskTap(item);
+                          },
+                          title: Text(t['title'] as String? ?? '',
+                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary)),
+                          subtitle: assignees.isNotEmpty
+                              ? Text(assignees, style: const TextStyle(fontSize: 11, color: _kMuted))
+                              : null,
+                          trailing: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: color.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(_healthLabel(health),
+                                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
+                              ),
+                              const SizedBox(height: 2),
+                              Text('$days days',
+                                  style: const TextStyle(fontSize: 10, color: _kMuted)),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+        ),
+      ],
+    );
+  }
 }
 
 // ─── Date picker overlay ──────────────────────────────────────────────────────

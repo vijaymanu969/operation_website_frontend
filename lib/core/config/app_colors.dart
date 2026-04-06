@@ -32,4 +32,27 @@ class AppColors {
   static const present = Color(0xFF4CAF50);
   static const leave = Color(0xFFFFF3CD);
   static const absent = Color(0xFFFFEBEE);
+
+  // ── User avatar colors (from backend ops_users.color) ─────────────────────
+  // These match the backend's allowed color values.
+  static const _userColorMap = <String, Color>{
+    'gray':   Color(0xFF9CA3AF),
+    'red':    Color(0xFFEF4444),
+    'orange': Color(0xFFF59E0B),
+    'yellow': Color(0xFFEAB308),
+    'green':  Color(0xFF10B981),
+    'blue':   Color(0xFF3B82F6),
+    'purple': Color(0xFF8B5CF6),
+    'pink':   Color(0xFFEC4899),
+  };
+
+  /// Map a backend color string to a Flutter Color.
+  /// Falls back to gray for unknown values.
+  static Color userColor(String? name) =>
+      _userColorMap[name ?? 'gray'] ?? _userColorMap['gray']!;
+
+  /// Keys available for color pickers (matches backend enum).
+  static const userColorKeys = [
+    'gray', 'red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink',
+  ];
 }

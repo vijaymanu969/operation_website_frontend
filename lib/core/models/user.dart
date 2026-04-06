@@ -6,6 +6,7 @@ class User {
   final String name;
   final String email;
   final UserRole role;
+  final String color;          // backend-assigned color: gray/blue/green/orange/purple/pink/red/yellow
   final bool isActive;
   final List<PageAccess> pageAccess;
 
@@ -14,6 +15,7 @@ class User {
     required this.name,
     required this.email,
     required this.role,
+    this.color = 'gray',
     this.isActive = true,
     this.pageAccess = const [],
   });
@@ -25,6 +27,7 @@ class User {
       name: json['name'] as String,
       email: json['email'] as String,
       role: UserRole.fromString(json['role'] as String),
+      color: json['color'] as String? ?? 'gray',
       isActive: json['is_active'] as bool? ?? true,
       pageAccess: accessList
           .map((e) => PageAccess.fromJson(e as Map<String, dynamic>))
@@ -37,6 +40,7 @@ class User {
         'name': name,
         'email': email,
         'role': role.value,
+        'color': color,
         'is_active': isActive,
         'page_access': pageAccess.map((e) => e.toJson()).toList(),
       };

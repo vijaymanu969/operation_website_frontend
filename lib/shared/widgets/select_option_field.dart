@@ -511,85 +511,38 @@ class _OptionRow extends StatefulWidget {
 }
 
 class _OptionRowState extends State<_OptionRow> {
-  bool _showColors = false;
-
-  void _showColorPicker() {
-    setState(() => _showColors = !_showColors);
-  }
-
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        InkWell(
-          onTap: widget.onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-            child: Row(children: [
-              // Drag handle
-              const Icon(Icons.drag_indicator,
-                  size: 16, color: Color(0xFFD1D5DB)),
-              const SizedBox(width: 6),
+    return InkWell(
+      onTap: widget.onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        child: Row(children: [
+          // Drag handle
+          const Icon(Icons.drag_indicator,
+              size: 16, color: Color(0xFFD1D5DB)),
+          const SizedBox(width: 6),
 
-              // Pill – tap to show color picker
-              Expanded(
-                child: GestureDetector(
-                  onTap: _showColorPicker,
-                  child: OptionPill(
-                    option:     widget.option,
-                    isSelected: widget.isSelected,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-
-              // X delete button
-              GestureDetector(
-                onTap: widget.onDelete,
-                child: Padding(
-                  padding: const EdgeInsets.all(4),
-                  child: Icon(Icons.close_rounded,
-                      size: 16, color: Colors.grey[400]),
-                ),
-              ),
-            ]),
-          ),
-        ),
-
-        // Color picker row (shown when pill is tapped)
-        if (_showColors)
-          Padding(
-            padding: const EdgeInsets.only(left: 30, right: 30, bottom: 6),
-            child: Wrap(
-              spacing: 8,
-              children: SelectOptionColor.values.map((c) {
-                final (bg, text) = _colorsFor(c);
-                final isCurrent  = c == widget.option.color;
-                return GestureDetector(
-                  onTap: () {
-                    widget.onColor(c);
-                    setState(() => _showColors = false);
-                  },
-                  child: Container(
-                    width:  22, height: 22,
-                    decoration: BoxDecoration(
-                      color:  bg,
-                      shape:  BoxShape.circle,
-                      border: Border.all(
-                        color: isCurrent ? text : text.withValues(alpha: 0.35),
-                        width: isCurrent ? 2    : 1,
-                      ),
-                    ),
-                    child: isCurrent
-                        ? Icon(Icons.check_rounded, size: 11, color: text)
-                        : null,
-                  ),
-                );
-              }).toList(),
+          // Pill
+          Expanded(
+            child: OptionPill(
+              option:     widget.option,
+              isSelected: widget.isSelected,
             ),
           ),
-      ],
+          const SizedBox(width: 6),
+
+          // X delete button
+          GestureDetector(
+            onTap: widget.onDelete,
+            child: Padding(
+              padding: const EdgeInsets.all(4),
+              child: Icon(Icons.close_rounded,
+                  size: 16, color: Colors.grey[400]),
+            ),
+          ),
+        ]),
+      ),
     );
   }
 }

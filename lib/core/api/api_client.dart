@@ -16,13 +16,26 @@ class ApiClient {
           baseUrl: AppConfig.baseUrl,
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 10),
-          headers: {'Content-Type': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            // Disable browser HTTP caching — prevents 304 Not Modified with empty body
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma':        'no-cache',
+            'Expires':       '0',
+          },
         )) {
     dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) async {
         final token = await _authService.getToken();
         if (token != null && token.isNotEmpty) {
           options.headers['Authorization'] = 'Bearer $token';
+        }
+        // Cache-busting query param for GET requests on web
+        if (options.method == 'GET') {
+          options.queryParameters = {
+            ...options.queryParameters,
+            '_t': DateTime.now().millisecondsSinceEpoch.toString(),
+          };
         }
         handler.next(options);
       },
@@ -63,6 +76,12 @@ class ApiClient {
     if (role != null) params['role'] = role;
     if (isActive != null) params['is_active'] = isActive;
     return dio.get('/users', queryParameters: params);
+  }
+
+  /// Lightweight user directory for pickers (person, reviewer, @mentions, etc.).
+  /// Returns only id, name, color, role for active users. Any authenticated user can call.
+  Future<Response> getUserDirectory() {
+    return dio.get('/users/directory');
   }
 
   Future<Response> getUser(String id) {
@@ -171,6 +190,17 @@ class ApiClient {
     final params = <String, dynamic>{};
     if (status != null) params['status'] = status;
     return dio.get('/idea-requests', queryParameters: params);
+  }
+
+  Future<Response> getPauseRequests({String? status, String? taskId}) {
+    final params = <String, dynamic>{};
+    if (status != null) params['status'] = status;
+    if (taskId != null) params['task_id'] = taskId;
+    return dio.get('/tasks/pause-requests', queryParameters: params);
+  }
+
+  Future<Response> reviewPauseRequest(String requestId, String status) {
+    return dio.put('/tasks/pause-requests/$requestId', data: {'status': status});
   }
 
   // ── Stagnant & Archive ─────────────────────────────────────────────────────
@@ -296,5 +326,13 @@ class ApiClient {
     if (startDate != null) params['start_date'] = startDate;
     if (endDate != null) params['end_date'] = endDate;
     return dio.get('/analytics/dashboard', queryParameters: params);
+  }
+
+  Future<Response> getTaskPerformance({String? userId, String? startDate, String? endDate}) {
+    final params = <String, dynamic>{};
+    if (userId != null)    params['user_id']    = userId;
+    if (startDate != null) params['start_date'] = startDate;
+    if (endDate != null)   params['end_date']   = endDate;
+    return dio.get('/analytics/tasks/performance', queryParameters: params);
   }
 }

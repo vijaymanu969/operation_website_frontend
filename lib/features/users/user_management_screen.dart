@@ -27,6 +27,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   UserRole _formRole = UserRole.worker;
+  String _formColor = 'gray';
   bool _formIsActive = true;
   Map<String, String?> _formPageAccess = {};
 
@@ -81,6 +82,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
       _emailCtrl.clear();
       _passwordCtrl.clear();
       _formRole = UserRole.worker;
+      _formColor = 'gray';
       _formIsActive = true;
       _formPageAccess = {for (var p in _allPages) p: null};
     });
@@ -108,6 +110,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
         _emailCtrl.text = fullUser['email'] ?? '';
         _passwordCtrl.clear();
         _formRole = UserRole.fromString(fullUser['role'] ?? 'worker');
+        _formColor = (fullUser['color'] as String?) ?? 'gray';
         _formIsActive = fullUser['is_active'] ?? true;
         _formPageAccess = accessMap;
       });
@@ -133,10 +136,11 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
       if (_isCreating) {
         // 1. Create user
         final res = await _api.createUser({
-          'name': _nameCtrl.text.trim(),
-          'email': _emailCtrl.text.trim(),
+          'name':     _nameCtrl.text.trim(),
+          'email':    _emailCtrl.text.trim(),
           'password': _passwordCtrl.text,
-          'role': _formRole.value,
+          'role':     _formRole.value,
+          'color':    _formColor,
         });
         final newUserId = res.data['id'] as String;
 
@@ -150,9 +154,10 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
 
         // 1. Update user
         await _api.updateUser(userId, {
-          'name': _nameCtrl.text.trim(),
-          'email': _emailCtrl.text.trim(),
-          'role': _formRole.value,
+          'name':      _nameCtrl.text.trim(),
+          'email':     _emailCtrl.text.trim(),
+          'role':      _formRole.value,
+          'color':     _formColor,
           'is_active': _formIsActive,
         });
 
@@ -402,6 +407,39 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
               },
             ),
             const SizedBox(height: 16),
+
+            // ── Color picker ────────────────────────────────────────────────
+            const Text('Color', style: TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: AppColors.userColorKeys.map((key) {
+                final color = AppColors.userColor(key);
+                final selected = _formColor == key;
+                return GestureDetector(
+                  onTap: () => setState(() => _formColor = key),
+                  child: Container(
+                    width: 30, height: 30,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: selected ? Colors.black87 : Colors.transparent,
+                        width: 2,
+                      ),
+                      boxShadow: selected
+                          ? [BoxShadow(color: color.withValues(alpha: 0.4), blurRadius: 6, spreadRadius: 1)]
+                          : null,
+                    ),
+                    child: selected
+                        ? const Icon(Icons.check, size: 16, color: Colors.white)
+                        : null,
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 20),
 
             SwitchListTile(
               title: const Text('Active', style: TextStyle(fontSize: 14)),
