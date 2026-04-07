@@ -233,6 +233,99 @@ class _TasksScreenState extends State<TasksScreen> {
       _filterType != null || _filterPriority != null ||
       _filterStatus != null || _filterHealth != null;
 
+  // ── Profile panel ────────────────────────────────────────────────────────
+  String?               _profileUserId;
+  Map<String, dynamic>? _profileData;
+  bool                  _profileLoading = false;
+
+  Future<void> _loadProfile(String userId) async {
+    setState(() {
+      _profileUserId  = userId;
+      _profileData    = null;
+      _profileLoading = true;
+    });
+    try {
+      final res = await _api.getUserSummary(userId);
+      if (mounted) setState(() => _profileData = res.data as Map<String, dynamic>);
+    } catch (_) {
+      if (mounted) setState(() => _profileData = null);
+    } finally {
+      if (mounted) setState(() => _profileLoading = false);
+    }
+  }
+
+  void _clearProfile() {
+    setState(() {
+      _profileUserId  = null;
+      _profileData    = null;
+      _profileLoading = false;
+    });
+  }
+
+  // ── Bulk select ──────────────────────────────────────────────────────────
+  bool _selectMode = false;
+  final Set<String> _selectedIds = {};
+
+  void _toggleSelectMode() {
+    setState(() {
+      _selectMode = !_selectMode;
+      _selectedIds.clear();
+    });
+  }
+
+  void _toggleCard(String id) {
+    setState(() {
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+      } else {
+        _selectedIds.add(id);
+      }
+    });
+  }
+
+  Future<void> _bulkDelete() async {
+    if (_selectedIds.isEmpty) return;
+    final count = _selectedIds.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        title: Text('Delete $count task${count == 1 ? '' : 's'}?',
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+        content: Text(
+          'This will permanently delete $count selected task${count == 1 ? '' : 's'}. This cannot be undone.',
+          style: const TextStyle(fontSize: 13, color: _kMuted),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFFEF4444)),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _api.deleteTasks(_selectedIds.toList());
+      setState(() {
+        _selectMode = false;
+        _selectedIds.clear();
+      });
+      _loadTasks();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to delete tasks')),
+        );
+      }
+    }
+  }
+
   ApiClient get _api => context.read<ApiClient>();
 
   @override
@@ -413,12 +506,15 @@ class _TasksScreenState extends State<TasksScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _TopBar(
-          onAddTask:  _showAddTaskDialog,
-          onStagnant: _isAdminUser(context) ? _showStagnantPanel : null,
-          onRequests: _isAdminUser(context) ? _showRequestsPanel : null,
+          onAddTask:       _showAddTaskDialog,
+          onStagnant:      _isAdminUser(context) ? _showStagnantPanel : null,
+          onRequests:      _isAdminUser(context) ? _showRequestsPanel : null,
+          onSelectToggle:  _toggleSelectMode,
+          selectMode:      _selectMode,
         ),
         // ── Filter bar ──────────────────────────────────────────────────
         _TaskFilterBar(
+          showPerson:     _isAdminUser(context),
           filterPerson:   _filterPerson,
           filterReviewer: _filterReviewer,
           filterType:     _filterType,
@@ -428,7 +524,17 @@ class _TasksScreenState extends State<TasksScreen> {
           users:          _users,
           taskTypes:      _taskTypeOpts,
           hasActive:      _hasActiveFilter,
-          onPersonChanged:   (v) { setState(() => _filterPerson   = v); _loadTasks(); },
+          onPersonChanged: (v) {
+            setState(() => _filterPerson = v);
+            _loadTasks();
+            if (_isAdminUser(context)) {
+              if (v != null) {
+                _loadProfile(v);
+              } else {
+                _clearProfile();
+              }
+            }
+          },
           onReviewerChanged: (v) { setState(() => _filterReviewer = v); _loadTasks(); },
           onTypeChanged:     (v) { setState(() => _filterType     = v); _loadTasks(); },
           onPriorityChanged: (v) { setState(() => _filterPriority = v); _loadTasks(); },
@@ -443,9 +549,36 @@ class _TasksScreenState extends State<TasksScreen> {
               _filterStatus   = null;
               _filterHealth   = null;
             });
+            _clearProfile();
             _loadTasks();
           },
         ),
+        // ── Bulk-action bar (shown in select mode) ──────────────────────────
+        if (_selectMode)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+            child: Row(children: [
+              Text(
+                '${_selectedIds.length} selected',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary),
+              ),
+              const SizedBox(width: 12),
+              FilledButton.icon(
+                onPressed: _selectedIds.isEmpty ? null : _bulkDelete,
+                icon:  const Icon(Icons.delete_outline_rounded, size: 14),
+                label: const Text('Delete', style: TextStyle(fontSize: 13)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFEF4444),
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: _kBorder,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  minimumSize:   Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ]),
+          ),
         const SizedBox(height: 4),
         Expanded(
           child: _loadingTasks
@@ -462,6 +595,45 @@ class _TasksScreenState extends State<TasksScreen> {
                     boardScrollController:  _scrollCtrl,
                     cardBuilder: (context, group, groupItem) {
                       final item = groupItem as TaskItem;
+                      final cardId = item.backendId ?? item.id;
+                      if (_selectMode) {
+                        return AppFlowyGroupCard(
+                          key: ValueKey(item.id),
+                          child: GestureDetector(
+                            onTap: () => _toggleCard(cardId),
+                            child: Stack(children: [
+                              _TaskCard(
+                                item:       item,
+                                isSelected: _selectedIds.contains(cardId),
+                                onTap:      () => _toggleCard(cardId),
+                              ),
+                              Positioned(
+                                top: 8, right: 8,
+                                child: IgnorePointer(
+                                  child: Container(
+                                    width: 18, height: 18,
+                                    decoration: BoxDecoration(
+                                      color: _selectedIds.contains(cardId)
+                                          ? _kAccent
+                                          : Colors.white,
+                                      border: Border.all(
+                                        color: _selectedIds.contains(cardId)
+                                            ? _kAccent
+                                            : _kBorder,
+                                        width: 1.5,
+                                      ),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: _selectedIds.contains(cardId)
+                                        ? const Icon(Icons.check, size: 12, color: Colors.white)
+                                        : null,
+                                  ),
+                                ),
+                              ),
+                            ]),
+                          ),
+                        );
+                      }
                       return AppFlowyGroupCard(
                         key: ValueKey(item.id),
                         child: _TaskCard(
@@ -486,6 +658,17 @@ class _TasksScreenState extends State<TasksScreen> {
                   ),
                 ),
               ),
+              // ── Profile panel (admin only, when person filter is set) ───
+              if (_profileUserId != null)
+                _UserProfilePanel(
+                  loading: _profileLoading,
+                  data:    _profileData,
+                  onClose: () {
+                    setState(() => _filterPerson = null);
+                    _clearProfile();
+                    _loadTasks();
+                  },
+                ),
             ],
           ),
         ),
@@ -545,6 +728,10 @@ class _TasksScreenState extends State<TasksScreen> {
                     item:          item,
                     onClose:       () => Navigator.of(ctx).pop(),
                     onChanged:     () => setState(() {}),
+                    onDeleted:     () {
+                      Navigator.of(ctx).pop();
+                      _loadTasks();
+                    },
                     typeOptions:   _taskTypeOpts,
                     currentUserId: (context.read<AuthBloc>().state is AuthAuthenticated)
                         ? (context.read<AuthBloc>().state as AuthAuthenticated).user.id
@@ -1099,9 +1286,17 @@ class _TasksScreenState extends State<TasksScreen> {
 
 class _TopBar extends StatelessWidget {
   final VoidCallback  onAddTask;
-  final VoidCallback? onStagnant;  // null = not shown (non-admin)
-  final VoidCallback? onRequests;  // null = not shown (non-admin/reviewer)
-  const _TopBar({required this.onAddTask, this.onStagnant, this.onRequests});
+  final VoidCallback? onStagnant;
+  final VoidCallback? onRequests;
+  final VoidCallback  onSelectToggle;
+  final bool          selectMode;
+  const _TopBar({
+    required this.onAddTask,
+    required this.onSelectToggle,
+    required this.selectMode,
+    this.onStagnant,
+    this.onRequests,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1147,6 +1342,22 @@ class _TopBar extends StatelessWidget {
             ),
             const SizedBox(width: 10),
           ],
+          // Select / Cancel button
+          OutlinedButton.icon(
+            onPressed: onSelectToggle,
+            icon:  Icon(selectMode ? Icons.close : Icons.checklist_rounded, size: 14),
+            label: Text(selectMode ? 'Cancel' : 'Select',
+                style: const TextStyle(fontSize: 13)),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _kMuted,
+              side: const BorderSide(color: _kBorder),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              minimumSize:   Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
+          const SizedBox(width: 10),
           FilledButton.icon(
             onPressed: onAddTask,
             icon:  const Icon(Icons.add, size: 16),
@@ -1176,6 +1387,7 @@ class _TaskFilterBar extends StatelessWidget {
   final Priority? filterPriority;
   final String?   filterStatus;
   final String?   filterHealth;
+  final bool      showPerson;
   final List<Map<String, dynamic>> users;
   final List<SelectOption>         taskTypes;
   final bool      hasActive;
@@ -1194,6 +1406,7 @@ class _TaskFilterBar extends StatelessWidget {
     required this.filterPriority,
     required this.filterStatus,
     required this.filterHealth,
+    required this.showPerson,
     required this.users,
     required this.taskTypes,
     required this.hasActive,
@@ -1226,14 +1439,16 @@ class _TaskFilterBar extends StatelessWidget {
               style: TextStyle(fontSize: 12, color: _kMuted, fontWeight: FontWeight.w500)),
           const SizedBox(width: 10),
 
-          // Person (assignee)
-          _FilterDropdown<String>(
-            label:    'Person',
-            value:    filterPerson,
-            items:    userItems,
-            onChanged: onPersonChanged,
-          ),
-          const SizedBox(width: 6),
+          // Person (assignee) — admin only
+          if (showPerson) ...[
+            _FilterDropdown<String>(
+              label:    'Person',
+              value:    filterPerson,
+              items:    userItems,
+              onChanged: onPersonChanged,
+            ),
+            const SizedBox(width: 6),
+          ],
 
           // Reviewer
           _FilterDropdown<String>(
@@ -1493,6 +1708,8 @@ class _TypeBadge extends StatelessWidget {
         border:       Border.all(color: _kBorder),
       ),
       child: Text(type,
+          overflow: TextOverflow.ellipsis,
+          maxLines: 1,
           style: const TextStyle(
               fontSize: 10, fontWeight: FontWeight.w500, color: _kMuted)),
     );
@@ -1605,13 +1822,17 @@ class _TaskCard extends StatelessWidget {
         margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color:        item.isPaused ? const Color(0xFFF9FAFB) : _kSurface,
+          color:        item.isPaused ? const Color(0xFFFFFBEB) : _kSurface,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: isSelected ? _kAccent : _kBorder,
-            width: isSelected ? 1.5 : 1,
+            color: isSelected
+                ? _kAccent
+                : item.isPaused
+                    ? const Color(0xFFF59E0B)
+                    : _kBorder,
+            width: isSelected ? 1.5 : item.isPaused ? 1.5 : 1,
           ),
-          boxShadow: [
+          boxShadow: item.isPaused ? [] : [
             BoxShadow(
               color:      Colors.black.withValues(alpha: 0.04),
               blurRadius: 6,
@@ -1627,11 +1848,20 @@ class _TaskCard extends StatelessWidget {
               children: [
                 _PriorityBadge(item.priority),
                 const SizedBox(width: 6),
-                _TypeBadge(item.type),
+                Flexible(child: _TypeBadge(item.type)),
+                const SizedBox(width: 6),
                 const Spacer(),
                 if (item.isPaused) ...[
-                  const Icon(Icons.pause_circle_outline_rounded,
-                      size: 14, color: Color(0xFF9CA3AF)),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                    decoration: BoxDecoration(
+                      color:        const Color(0xFFFEF3C7),
+                      borderRadius: BorderRadius.circular(4),
+                      border:       Border.all(color: const Color(0xFFF59E0B)),
+                    ),
+                    child: const Icon(Icons.pause_rounded,
+                        size: 11, color: Color(0xFFD97706)),
+                  ),
                   const SizedBox(width: 6),
                 ],
                 if (item.health != null && item.status == 'not_completed' && !item.isPaused) ...[
@@ -1648,10 +1878,10 @@ class _TaskCard extends StatelessWidget {
             Text(
               item.title,
               style: TextStyle(
-                fontSize:      13,
-                fontWeight:    FontWeight.w600,
-                color:         item.isDone ? _kMuted : _kPrimary,
-                decoration:    item.isDone ? TextDecoration.lineThrough : null,
+                fontSize:        13,
+                fontWeight:      FontWeight.w600,
+                color:           item.isDone || item.isPaused ? _kMuted : _kPrimary,
+                decoration:      item.isDone ? TextDecoration.lineThrough : null,
                 decorationColor: _kMuted,
               ),
             ),
@@ -1794,6 +2024,7 @@ class _TaskDetailPanel extends StatefulWidget {
   final TaskItem     item;
   final VoidCallback onClose;
   final VoidCallback onChanged;
+  final VoidCallback? onDeleted;
   final List<SelectOption> typeOptions;
   final String? currentUserId;
 
@@ -1802,6 +2033,7 @@ class _TaskDetailPanel extends StatefulWidget {
     required this.item,
     required this.onClose,
     required this.onChanged,
+    this.onDeleted,
     this.typeOptions    = const [],
     this.currentUserId,
   });
@@ -1820,6 +2052,35 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   Timer? _debounce;
 
   late final List<SelectOption> _typeOpts = List<SelectOption>.from(widget.typeOptions);
+
+  // Comments loaded from API
+  List<Map<String, dynamic>> _comments    = [];
+  bool                       _loadingComments = false;
+  bool                       _postingComment  = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadComments();
+  }
+
+  Future<void> _loadComments() async {
+    final id = widget.item.backendId;
+    if (id == null) return;
+    setState(() => _loadingComments = true);
+    try {
+      final res = await context.read<ApiClient>().getTaskComments(id);
+      if (mounted) {
+        setState(() {
+          _comments = (res.data as List).cast<Map<String, dynamic>>();
+        });
+      }
+    } catch (_) {
+      // keep empty on error
+    } finally {
+      if (mounted) setState(() => _loadingComments = false);
+    }
+  }
 
   @override
   void dispose() {
@@ -1846,6 +2107,44 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   void _saveLater(Map<String, dynamic> data) {
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 600), () => _saveField(data));
+  }
+
+  Future<void> _confirmDelete() async {
+    final id = widget.item.backendId;
+    if (id == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        title: const Text('Delete task?', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+        content: Text(
+          'Are you sure you want to delete "${widget.item.title}"? This cannot be undone.',
+          style: const TextStyle(fontSize: 13, color: _kMuted),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFFEF4444)),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await context.read<ApiClient>().deleteTasks([id]);
+      widget.onDeleted?.call();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to delete task')),
+        );
+      }
+    }
   }
 
   // Build the status action widget:
@@ -2204,8 +2503,18 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       );
     } catch (e) {
       if (!mounted) return;
-      // Surface the backend error message (e.g. "You have used all 3 idea moves")
-      final msg = (e is Exception) ? e.toString() : 'Failed to send idea request';
+      // Extract the backend's actual error message from {error: "..."}
+      String msg = 'Failed to send idea request';
+      if (e is DioException) {
+        final data = e.response?.data;
+        if (data is Map && data['error'] is String) {
+          msg = data['error'] as String;
+        } else if (e.response?.statusCode == 403) {
+          msg = 'You do not have permission to move this task to ideas';
+        } else if (e.response?.statusCode == 429) {
+          msg = 'Monthly idea-move quota exceeded (3/3)';
+        }
+      }
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     }
   }
@@ -2260,26 +2569,27 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       mainAxisSize:        MainAxisSize.min,
       crossAxisAlignment:  CrossAxisAlignment.start,
       children: [
-        // ── Close button row ──────────────────────────────────────────────
-        Align(
-          alignment: Alignment.topRight,
-          child: Padding(
+        // ── Header button row (delete only) ──────────────────────────────
+        if (widget.item.backendId != null)
+          Padding(
             padding: const EdgeInsets.only(top: 12, right: 12),
-            child: InkWell(
-              onTap:        widget.onClose,
-              borderRadius: BorderRadius.circular(6),
-              child: Container(
-                width:  28, height: 28,
-                decoration: BoxDecoration(
-                  color:        _kBg,
-                  borderRadius: BorderRadius.circular(6),
-                  border:       Border.all(color: _kBorder),
+            child: Align(
+              alignment: Alignment.topRight,
+              child: InkWell(
+                onTap:        _confirmDelete,
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  width:  28, height: 28,
+                  decoration: BoxDecoration(
+                    color:        const Color(0xFFFEF2F2),
+                    borderRadius: BorderRadius.circular(6),
+                    border:       Border.all(color: const Color(0xFFFCA5A5)),
+                  ),
+                  child: const Icon(Icons.delete_outline_rounded, size: 14, color: Color(0xFFEF4444)),
                 ),
-                child: Icon(Icons.close, size: 14, color: _kMuted),
               ),
             ),
           ),
-        ),
 
         // ── Body ────────────────────────────────────────────────────────────
         Flexible(
@@ -2531,16 +2841,22 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                       borderRadius: BorderRadius.circular(10),
                       border:       Border.all(color: _kBorder),
                     ),
-                    child: Text('${item.comments.length}',
+                    child: Text('${_comments.length}',
                         style: const TextStyle(fontSize: 10, color: _kMuted)),
                   ),
                 ]),
                 const SizedBox(height: 10),
-                if (item.commentsList.isEmpty)
+                if (_loadingComments)
+                  const Center(child: Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: SizedBox(width: 18, height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2)),
+                  ))
+                else if (_comments.isEmpty)
                   const Text('No comments yet',
                       style: TextStyle(fontSize: 12, color: _kMuted))
                 else
-                  ...item.commentsList.map((c) {
+                  ..._comments.map((c) {
                     final isSystem = c['is_system'] as bool? ?? false;
                     if (isSystem) {
                       return _ActivityLogEntry(text: c['text'] as String? ?? '');
@@ -2578,15 +2894,21 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   ),
                   const SizedBox(width: 8),
                   GestureDetector(
-                    onTap: _addComment,
+                    onTap: _postingComment ? null : _addComment,
                     child: Container(
                       width:  32, height: 32,
                       decoration: BoxDecoration(
-                        color:        _kAccent,
+                        color:        _postingComment ? _kMuted : _kAccent,
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: const Icon(Icons.send_rounded,
-                          size: 14, color: Colors.white),
+                      child: _postingComment
+                          ? const Padding(
+                              padding: EdgeInsets.all(8),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white),
+                            )
+                          : const Icon(Icons.send_rounded,
+                              size: 14, color: Colors.white),
                     ),
                   ),
                 ]),
@@ -2598,33 +2920,29 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     );
   }
 
-  void _addComment() async {
+  Future<void> _addComment() async {
     final text = _commentCtrl.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty || _postingComment) return;
     final backendId = widget.item.backendId;
-    if (backendId != null) {
-      try {
-        final api = context.read<ApiClient>();
-        final res = await api.addTaskComment(backendId, text);
-        final comment = res.data as Map<String, dynamic>;
-        setState(() {
-          widget.item.commentsList.add(comment);
-          _commentCtrl.clear();
-        });
-      } catch (_) {
-        // Fallback — add locally
-        setState(() {
-          widget.item.commentsList.add({'text': text, 'user_name': 'You'});
-          _commentCtrl.clear();
-        });
+    if (backendId == null) return;
+
+    setState(() => _postingComment = true);
+    _commentCtrl.clear();
+    try {
+      final res = await context.read<ApiClient>().addTaskComment(backendId, text);
+      final comment = res.data as Map<String, dynamic>;
+      if (mounted) setState(() => _comments.add(comment));
+    } catch (_) {
+      // restore text so user can retry
+      if (mounted) {
+        _commentCtrl.text = text;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to post comment')),
+        );
       }
-    } else {
-      setState(() {
-        widget.item.commentsList.add({'text': text});
-        _commentCtrl.clear();
-      });
+    } finally {
+      if (mounted) setState(() => _postingComment = false);
     }
-    widget.onChanged();
   }
 }
 
@@ -3397,5 +3715,320 @@ class _CalNavBtn extends StatelessWidget {
         child: Icon(icon, size: 16, color: _kPrimary),
       ),
     );
+  }
+}
+
+// ─── User profile panel (right of kanban, admin only) ────────────────────────
+
+class _UserProfilePanel extends StatelessWidget {
+  final bool                  loading;
+  final Map<String, dynamic>? data;
+  final VoidCallback          onClose;
+
+  const _UserProfilePanel({
+    required this.loading,
+    required this.data,
+    required this.onClose,
+  });
+
+  Color _gradeColor(double pct) {
+    if (pct >= 75) return const Color(0xFF10B981);
+    if (pct >= 50) return const Color(0xFFF59E0B);
+    return const Color(0xFFEF4444);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 320,
+      margin: const EdgeInsets.only(right: 16, bottom: 16),
+      decoration: BoxDecoration(
+        color:        _kSurface,
+        borderRadius: BorderRadius.circular(12),
+        border:       Border.all(color: _kBorder),
+        boxShadow: [
+          BoxShadow(
+            color:      Colors.black.withValues(alpha: 0.04),
+            blurRadius: 12,
+            offset:     const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: loading
+          ? const Center(child: Padding(
+              padding: EdgeInsets.all(40),
+              child: CircularProgressIndicator(),
+            ))
+          : data == null
+              ? Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.error_outline, color: _kMuted, size: 32),
+                    const SizedBox(height: 8),
+                    const Text('Failed to load profile',
+                        style: TextStyle(fontSize: 12, color: _kMuted)),
+                    const SizedBox(height: 12),
+                    TextButton(onPressed: onClose, child: const Text('Close')),
+                  ]),
+                )
+              : _buildContent(context),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    final d = data!;
+    final name       = d['user_name']             as String? ?? '–';
+    final role       = d['role']                  as String? ?? '';
+    final workload   = d['workload']              as Map<String, dynamic>? ?? {};
+    final perf       = d['performance']           as Map<String, dynamic>? ?? {};
+    final health     = d['health_breakdown']      as Map<String, dynamic>? ?? {};
+    final recent     = (d['recent_completed']     as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final pauseCount = d['pause_count_this_month'] as int?    ?? 0;
+    final compRate   = (d['completion_rate']      as num?)?.toDouble() ?? 0;
+    final totalAssigned = workload['total_assigned'] as int? ?? 0;
+    final completed     = workload['completed']     as int? ?? 0;
+
+    final avgDrift = (perf['avg_drift'] as num?)?.toDouble();
+    final driftClr = avgDrift == null
+        ? _kMuted
+        : avgDrift <= 0
+            ? const Color(0xFF10B981)
+            : avgDrift <= 2
+                ? const Color(0xFFF59E0B)
+                : const Color(0xFFEF4444);
+    final driftLbl = avgDrift == null
+        ? '–'
+        : avgDrift == 0
+            ? '0d'
+            : avgDrift < 0
+                ? '${avgDrift.toStringAsFixed(1)}d'
+                : '+${avgDrift.toStringAsFixed(1)}d';
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header: name + close ────────────────────────────────────────
+          Row(children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name,
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w700, color: _kPrimary),
+                      overflow: TextOverflow.ellipsis),
+                  if (role.isNotEmpty)
+                    Text(role,
+                        style: const TextStyle(fontSize: 11, color: _kMuted)),
+                ],
+              ),
+            ),
+            InkWell(
+              onTap: onClose,
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                width: 24, height: 24,
+                decoration: BoxDecoration(
+                  color:        _kBg,
+                  borderRadius: BorderRadius.circular(6),
+                  border:       Border.all(color: _kBorder),
+                ),
+                child: const Icon(Icons.close, size: 12, color: _kMuted),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 14),
+
+          // ── Workload chips ──────────────────────────────────────────────
+          Wrap(spacing: 6, runSpacing: 6, children: [
+            _profileChip('${workload['not_completed'] ?? 0} Active',  const Color(0xFF6366F1)),
+            _profileChip('${workload['in_review'] ?? 0} Review',      const Color(0xFFF59E0B)),
+            _profileChip('${workload['completed'] ?? 0} Done',        const Color(0xFF10B981)),
+            _profileChip('${workload['paused'] ?? 0} Paused',         const Color(0xFF9CA3AF)),
+            if ((workload['idea'] as int? ?? 0) > 0)
+              _profileChip('${workload['idea']} Ideas', const Color(0xFF8B5CF6)),
+          ]),
+          const SizedBox(height: 16),
+
+          // ── Donut + completion rate ─────────────────────────────────────
+          Center(
+            child: SizedBox(
+              width: 110, height: 110,
+              child: Stack(alignment: Alignment.center, children: [
+                SizedBox(
+                  width: 110, height: 110,
+                  child: CircularProgressIndicator(
+                    value:           compRate / 100,
+                    strokeWidth:     10,
+                    backgroundColor: _kBorder,
+                    color:           _gradeColor(compRate),
+                  ),
+                ),
+                Column(mainAxisSize: MainAxisSize.min, children: [
+                  Text('${compRate.toStringAsFixed(0)}%',
+                      style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: _gradeColor(compRate))),
+                  Text('$completed/$totalAssigned done',
+                      style: const TextStyle(fontSize: 10, color: _kMuted)),
+                ]),
+              ]),
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // ── Performance ─────────────────────────────────────────────────
+          const Text('PERFORMANCE',
+              style: TextStyle(
+                  fontSize: 10, fontWeight: FontWeight.w700,
+                  color: _kMuted, letterSpacing: 0.5)),
+          const SizedBox(height: 8),
+          _profileRow('Avg actual',  '${(perf['avg_actual_days']  as num?)?.toStringAsFixed(1) ?? '–'}d'),
+          _profileRow('Avg planned', '${(perf['avg_planned_days'] as num?)?.toStringAsFixed(1) ?? '–'}d'),
+          _profileRow('Avg drift',   driftLbl, valueColor: driftClr),
+          _profileRow('On time',
+              '${perf['on_time'] ?? 0}  ·  L:${perf['late'] ?? 0}  ·  E:${perf['early'] ?? 0}'),
+          const SizedBox(height: 16),
+
+          // ── Health ──────────────────────────────────────────────────────
+          const Text('ACTIVE TASK HEALTH',
+              style: TextStyle(
+                  fontSize: 10, fontWeight: FontWeight.w700,
+                  color: _kMuted, letterSpacing: 0.5)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 10, runSpacing: 6, children: [
+            _healthDot('Active',   health['active']   as int? ?? 0, const Color(0xFF10B981)),
+            _healthDot('At Risk',  health['at_risk']  as int? ?? 0, const Color(0xFFF59E0B)),
+            _healthDot('Stagnant', health['stagnant'] as int? ?? 0, const Color(0xFFF97316)),
+            _healthDot('Dead',     health['dead']     as int? ?? 0, const Color(0xFFEF4444)),
+          ]),
+          const SizedBox(height: 14),
+
+          // ── Pause discipline ────────────────────────────────────────────
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: pauseCount > 2
+                  ? const Color(0xFFFFF7E8)
+                  : _kBg,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                  color: pauseCount > 2
+                      ? const Color(0xFFF97316)
+                      : _kBorder),
+            ),
+            child: Row(children: [
+              Icon(Icons.pause_circle_outline_rounded,
+                  size: 14,
+                  color: pauseCount > 2
+                      ? const Color(0xFFF97316)
+                      : _kMuted),
+              const SizedBox(width: 6),
+              const Text('Paused this month: ',
+                  style: TextStyle(fontSize: 11, color: _kPrimary)),
+              Text('$pauseCount',
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: pauseCount > 2
+                          ? const Color(0xFFF97316)
+                          : _kPrimary)),
+            ]),
+          ),
+
+          if (recent.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            const Text('RECENT COMPLETED',
+                style: TextStyle(
+                    fontSize: 10, fontWeight: FontWeight.w700,
+                    color: _kMuted, letterSpacing: 0.5)),
+            const SizedBox(height: 8),
+            ...recent.take(5).map((t) {
+              final drift = (t['drift'] as num?)?.toDouble();
+              final dClr  = drift == null
+                  ? _kMuted
+                  : drift <= 0
+                      ? const Color(0xFF10B981)
+                      : const Color(0xFFEF4444);
+              final dLbl = drift == null
+                  ? '–'
+                  : drift == 0
+                      ? 'On time'
+                      : drift < 0
+                          ? '${drift.toStringAsFixed(0)}d early'
+                          : '+${drift.toStringAsFixed(0)}d';
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(children: [
+                  Container(width: 5, height: 5,
+                      decoration: BoxDecoration(color: dClr, shape: BoxShape.circle)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(t['title'] as String? ?? '–',
+                        style: const TextStyle(fontSize: 11, color: _kPrimary),
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                  Text('${t['actual_days'] ?? '–'}d',
+                      style: const TextStyle(fontSize: 11, color: _kMuted)),
+                  const SizedBox(width: 8),
+                  Text(dLbl,
+                      style: TextStyle(
+                          fontSize: 11, fontWeight: FontWeight.w600, color: dClr)),
+                ]),
+              );
+            }),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _profileChip(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color:        color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(20),
+        border:       Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Text(text,
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color)),
+    );
+  }
+
+  Widget _profileRow(String label, String value, {Color? valueColor}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(children: [
+        SizedBox(
+          width: 86,
+          child: Text(label,
+              style: const TextStyle(fontSize: 11, color: _kMuted)),
+        ),
+        Expanded(
+          child: Text(value,
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: valueColor ?? _kPrimary)),
+        ),
+      ]),
+    );
+  }
+
+  Widget _healthDot(String label, int count, Color color) {
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Container(width: 7, height: 7,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+      const SizedBox(width: 4),
+      Text('$label: $count',
+          style: TextStyle(
+              fontSize: 11,
+              color: count > 0 ? color : _kMuted,
+              fontWeight: count > 0 ? FontWeight.w600 : FontWeight.normal)),
+    ]);
   }
 }

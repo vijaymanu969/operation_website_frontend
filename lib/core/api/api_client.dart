@@ -130,8 +130,16 @@ class ApiClient {
     return dio.delete('/tasks/$id');
   }
 
+  Future<Response> deleteTasks(List<String> ids) {
+    return dio.delete('/tasks', data: {'ids': ids});
+  }
+
   Future<Response> changeTaskStatus(String id, String status) {
     return dio.put('/tasks/$id/status', data: {'status': status});
+  }
+
+  Future<Response> getTaskComments(String id) {
+    return dio.get('/tasks/$id/comments');
   }
 
   Future<Response> addTaskComment(String id, String text) {
@@ -227,6 +235,16 @@ class ApiClient {
 
   Future<Response> bulkUpsertAttendance(List<Map<String, dynamic>> rows) {
     return dio.post('/attendance/bulk', data: {'rows': rows});
+  }
+
+  Future<Response> importAttendance({
+    required List<int> bytes,
+    required String filename,
+  }) {
+    final form = FormData.fromMap({
+      'file': MultipartFile.fromBytes(bytes, filename: filename),
+    });
+    return dio.post('/attendance/import', data: form);
   }
 
   Future<Response> updateAttendance(String id, Map<String, dynamic> data) {
@@ -326,6 +344,10 @@ class ApiClient {
     if (startDate != null) params['start_date'] = startDate;
     if (endDate != null) params['end_date'] = endDate;
     return dio.get('/analytics/dashboard', queryParameters: params);
+  }
+
+  Future<Response> getUserSummary(String userId) {
+    return dio.get('/analytics/users/$userId/summary');
   }
 
   Future<Response> getTaskPerformance({String? userId, String? startDate, String? endDate}) {

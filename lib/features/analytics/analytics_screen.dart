@@ -250,6 +250,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
           ),
           const SizedBox(height: 32),
 
+          // ── Attendance per person ─────────────────────────────────────────
+          _buildAttendanceSummary(),
+          const SizedBox(height: 32),
+
           // ── Team Delivery Performance ─────────────────────────────────────
           _buildDeliverySection(),
           const SizedBox(height: 8),
@@ -363,9 +367,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
     final tasksByPriority = _data!['tasks_by_priority'] as Map<String, dynamic>? ?? {};
     final sections = <PieChartSectionData>[];
     final colors = {
-      'high': AppColors.priorityHigh,
+      'urgent': const Color(0xFF7C3AED),
+      'high':   AppColors.priorityHigh,
       'medium': AppColors.priorityMedium,
-      'low': AppColors.priorityLow,
+      'low':    AppColors.priorityLow,
     };
 
     tasksByPriority.forEach((key, value) {
@@ -523,6 +528,62 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
   }
 
   String _formatLabel(String s) => s.replaceAll('_', ' ').split(' ').map((w) => w.isEmpty ? '' : '${w[0].toUpperCase()}${w.substring(1)}').join(' ');
+
+  // ── Attendance per-person summary ──────────────────────────────────────────
+
+  Widget _buildAttendanceSummary() {
+    final rows = (_data!['attendance_summary'] as List?)
+        ?.cast<Map<String, dynamic>>() ?? [];
+    if (rows.isEmpty) return const SizedBox.shrink();
+
+    return _ChartCard(
+      title: 'Attendance This Month',
+      child: Column(
+        children: [
+          // Header
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(children: const [
+              Expanded(flex: 3, child: Text('Member',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF9CA3AF)))),
+              Expanded(flex: 2, child: Text('Present',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF9CA3AF)))),
+              Expanded(flex: 2, child: Text('Leave',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF9CA3AF)))),
+              Expanded(flex: 2, child: Text('Hours',
+                  textAlign: TextAlign.right,
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF9CA3AF)))),
+            ]),
+          ),
+          const Divider(height: 1),
+          ...rows.map((r) {
+            final name        = r['user_name']   as String? ?? '–';
+            final daysPresent = r['days_present'] as int?    ?? 0;
+            final daysLeave   = r['days_leave']   as int?    ?? 0;
+            final totalHours  = (r['total_hours'] as num?)?.toDouble() ?? 0;
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Row(children: [
+                Expanded(flex: 3, child: Text(name,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500))),
+                Expanded(flex: 2, child: Text('$daysPresent',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF10B981)))),
+                Expanded(flex: 2, child: Text('$daysLeave',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12, color: Color(0xFFF59E0B)))),
+                Expanded(flex: 2, child: Text('${totalHours.toStringAsFixed(1)}h',
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF6366F1)))),
+              ]),
+            );
+          }),
+        ],
+      ),
+    );
+  }
 
   // ── Delivery Performance section ───────────────────────────────────────────
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,8 +12,8 @@ const _kBorder  = Color(0xFFE8ECF3);
 const _kBg      = Color(0xFFF7F8FA);
 const _kPrimary = Color(0xFF1A1A2E);
 
-const _kEmployees = ['VIJAY', 'VIDHYADHAR', 'HARSHA', 'VISWAS', 'ASHWIN', 'PRABHAS'];
-
+// Per-user color palette — keys are matched against user names (uppercase).
+// Falls back to grey for users not listed here.
 const _kEmployeeColors = <String, Color>{
   'VIJAY':      Color(0xFFE05A3A),
   'VIDHYADHAR': Color(0xFF3A7BD5),
@@ -20,26 +21,6 @@ const _kEmployeeColors = <String, Color>{
   'VISWAS':     Color(0xFF2E9E5B),
   'ASHWIN':     Color(0xFFD63B7A),
   'PRABHAS':    Color(0xFF7C5CBF),
-};
-
-const _kSeedData = <String, Map<String, String>>{
-  '16-02-2026': {'VIJAY':'11:45:00-9:45','VIDHYADHAR':'12:15:00-8','HARSHA':'12:15:00-8','VISWAS':'11:45:00-7:30','ASHWIN':'01:30:00-9:','PRABHAS':'09:00:00-5:10'},
-  '17-02-2026': {'VIJAY':'11:30:00-9:15','VIDHYADHAR':'11:50:00-9:15','HARSHA':'11:50:00-9:15','VISWAS':'11:28:00-8','ASHWIN':'11:30:00-9:15','PRABHAS':'09:00:00-5:00'},
-  '18-02-2026': {'VIJAY':'01:25:00-7:10','VIDHYADHAR':'12:30:00-6','HARSHA':'12:30:00-6','VISWAS':'10:15:00-7:10','ASHWIN':'leave or wfh','PRABHAS':'09:00:00-5:00'},
-  '19-02-2026': {'VIJAY':'11:56:00-9','VIDHYADHAR':'12:41:00-6','HARSHA':'12:41:00-6','VISWAS':'10:35:00-9','ASHWIN':'leave','PRABHAS':'09:00:00-5:00'},
-  '20-02-2026': {'VIJAY':'12:25:00-7:30','VIDHYADHAR':'leave','HARSHA':'leave','VISWAS':'12:25:00-7:30','ASHWIN':'12:14:00-7:30','PRABHAS':'09:00:00-5:00'},
-  '21-02-2026': {'VIJAY':'leave','VIDHYADHAR':'leave','HARSHA':'leave','VISWAS':'leave','ASHWIN':'12:30:00-5','PRABHAS':'leave'},
-  '23-02-2026': {'VIJAY':'leave','VIDHYADHAR':'leave','HARSHA':'leave','VISWAS':'10:45:00-5','ASHWIN':'12:20:00-5','PRABHAS':'09:00:00-4:50'},
-  '24-02-2026': {'VIJAY':'leave','VIDHYADHAR':'leave','HARSHA':'leave','VISWAS':'10:45:00-5','ASHWIN':'leave','PRABHAS':'09:00:00-5:00'},
-  '25-02-2026': {},
-  '26-02-2026': {},
-  '27-02-2026': {'VIJAY':'11:52:00-9:10','VIDHYADHAR':'leave','HARSHA':'leave','VISWAS':'11:52:00-9:10','ASHWIN':'11:52:00-9:10','PRABHAS':'09:00:00-5:00'},
-  '28-02-2026': {'VIJAY':'12:30:00-6','VIDHYADHAR':'leave','HARSHA':'leave','VISWAS':'12:30:00-6','ASHWIN':'01:40:00-9','PRABHAS':'leave'},
-  '02-03-2026': {'VIJAY':'10:40:00-3:25','VIDHYADHAR':'11:35:00-8:30','HARSHA':'11:35:00-8:30','VISWAS':'11:10:00-8:30','ASHWIN':'12:36:00-8:30','PRABHAS':'09:00:00-6:15'},
-  '03-03-2026': {'VIJAY':'11:53:00-9:40','VIDHYADHAR':'11:20:00-9:40','HARSHA':'11:20:00-9:40','VISWAS':'11:00:00-9:40','ASHWIN':'11:53:00-9:40','PRABHAS':'09:00:00-3:00'},
-  '04-03-2026': {'VIJAY':'11:21:00-5:20','VIDHYADHAR':'11:40:00-8:00','HARSHA':'11:40:00-8:00','VISWAS':'10:40:00-8','ASHWIN':'11:21:00-8','PRABHAS':'09:00:00-5:20'},
-  '05-03-2026': {'VIJAY':'11:36:00-8','VIDHYADHAR':'10:30:00-5:30','HARSHA':'10:30:00-5:30','VISWAS':'11:36:00-8','ASHWIN':'leave(fever)','PRABHAS':'09:00:00-5:00'},
-  '06-03-2026': {'VIJAY':'11:00:00-8','VIDHYADHAR':'12:05:00-8','HARSHA':'','VISWAS':'10:50:00-8','ASHWIN':'11:00:00-8','PRABHAS':''},
 };
 
 // ─── Parsing ──────────────────────────────────────────────────────────────────
@@ -127,7 +108,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   bool _loadingData = true;
 
   // Dynamic employee list — loaded from backend users
-  List<String> _employees = List<String>.from(_kEmployees);
+  List<String> _employees = [];
+
+  // Currently viewed month (1st of the month at local midnight)
+  DateTime _viewMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
   // Map user_name (uppercase) → user_id for saving
   Map<String, String> _employeeIds = {};
 
@@ -157,8 +141,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   bool _syncingH = false;
   bool _syncingV = false;
 
-  // Cached summaries �� invalidated when data changes, rebuilt lazily.
+  // Cached summaries — invalidated when data changes, rebuilt lazily.
   List<_EmployeeSummary>? _cachedSummaries;
+  // Server-computed summaries (preferred when fresh)
+  List<_EmployeeSummary>? _apiSummaries;
   Timer? _analysisDebounce;
   Timer? _saveDebounce;
 
@@ -308,19 +294,24 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           (u['name'] as String).toUpperCase(): u['id'] as String,
       };
 
-      // 2. Load attendance for current month
-      final now = DateTime.now();
-      final startDate = '${now.year}-${now.month.toString().padLeft(2, '0')}-01';
-      final endDate = '${now.year}-${now.month.toString().padLeft(2, '0')}-${DateTime(now.year, now.month + 1, 0).day}';
+      // 2. Load attendance for the currently viewed month
+      final m = _viewMonth;
+      final lastDay = DateTime(m.year, m.month + 1, 0).day;
+      final startDate = '${m.year}-${m.month.toString().padLeft(2, '0')}-01';
+      final endDate   = '${m.year}-${m.month.toString().padLeft(2, '0')}-'
+          '${lastDay.toString().padLeft(2, '0')}';
       final attRes = await _api.getAttendance(startDate: startDate, endDate: endDate);
       final attData = (attRes.data as List).cast<Map<String, dynamic>>();
 
       // 3. Transform API data → row format: {date: 'DD-MM-YYYY', EMPLOYEE: 'raw_value', ...}
       final rowMap = <String, Map<String, String>>{}; // date string → row
       for (final entry in attData) {
-        final dateStr = entry['date'] as String; // YYYY-MM-DD
-        final parts = dateStr.split('-');
-        final displayDate = '${parts[2]}-${parts[1]}-${parts[0]}'; // DD-MM-YYYY
+        // API returns full ISO ('2026-04-05T18:30:00.000Z') — parse it
+        final dt = DateTime.parse(entry['date'] as String).toLocal();
+        final displayDate =
+            '${dt.day.toString().padLeft(2, '0')}-'
+            '${dt.month.toString().padLeft(2, '0')}-'
+            '${dt.year}';
         final userName = (entry['user_name'] as String? ?? '').toUpperCase();
         final rawValue = entry['raw_value'] as String? ?? '';
 
@@ -346,28 +337,49 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         _rows.add(rowMap[key]!);
       }
 
-      // If no data, add at least one empty row for today
-      if (_rows.isEmpty) {
-        final today = DateTime.now();
-        final row = <String, String>{
-          'date': '${today.day.toString().padLeft(2, '0')}-${today.month.toString().padLeft(2, '0')}-${today.year}',
-        };
-        for (final emp in _employees) { row[emp] = ''; }
-        _rows.add(row);
-      }
-
       _rebuildCells();
-    } catch (_) {
-      // Fallback to seed data if API fails
-      for (final entry in _kSeedData.entries) {
-        final row = <String, String>{'date': entry.key};
-        for (final emp in _kEmployees) { row[emp] = entry.value[emp] ?? ''; }
-        _rows.add(row);
-      }
-      _employees = List<String>.from(_kEmployees);
+      // Fetch server-computed summary in the background (non-blocking)
+      _loadSummariesFromApi(startDate, endDate);
+    } catch (e) {
+      // No fallback — show empty state and surface the error
+      _rows.clear();
       _rebuildCells();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to load attendance: $e')),
+        );
+      }
     }
     if (mounted) setState(() => _loadingData = false);
+  }
+
+  /// Fetch server-computed per-user summary for the given range.
+  /// This is the truth source — local _computeSummaries is a fallback.
+  Future<void> _loadSummariesFromApi(String startDate, String endDate) async {
+    try {
+      final res = await _api.getAttendanceSummary(
+          startDate: startDate, endDate: endDate);
+      final list = (res.data as List).cast<Map<String, dynamic>>();
+      final mapped = list.map((row) {
+        final name = (row['user_name'] as String? ?? '').toUpperCase();
+        return _EmployeeSummary(
+          name:         name,
+          totalHours:   (row['total_hours']  as num?)?.toDouble() ?? 0,
+          daysPresent:  row['days_present']  as int?    ?? 0,
+          leaves:       row['days_leave']    as int?    ?? 0,
+          color:        _kEmployeeColors[name] ?? Colors.grey,
+        );
+      }).toList();
+      // Order summaries to match _employees order so the UI is stable
+      mapped.sort((a, b) {
+        final ai = _employees.indexOf(a.name);
+        final bi = _employees.indexOf(b.name);
+        return (ai == -1 ? 999 : ai).compareTo(bi == -1 ? 999 : bi);
+      });
+      if (mounted) setState(() => _apiSummaries = mapped);
+    } catch (_) {
+      // silent — local fallback already in place
+    }
   }
 
   /// Save all attendance data to backend via bulk upsert
@@ -394,6 +406,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (bulkRows.isNotEmpty) {
       try {
         await _api.bulkUpsertAttendance(bulkRows);
+        // Refresh server summaries for the currently viewed month
+        final m = _viewMonth;
+        final last = DateTime(m.year, m.month + 1, 0).day;
+        final s = '${m.year}-${m.month.toString().padLeft(2, '0')}-01';
+        final e = '${m.year}-${m.month.toString().padLeft(2, '0')}-'
+            '${last.toString().padLeft(2, '0')}';
+        _loadSummariesFromApi(s, e);
       } catch (_) {}
     }
   }
@@ -501,8 +520,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   // ── Analysis cache helpers ───────────────────────────────────────────────────
+  // Prefer server-computed summaries when available; fall back to local
+  // compute (used during edits before debounced save lands).
   List<_EmployeeSummary> get _summaries =>
-      _cachedSummaries ??= _computeSummaries(_employees, _rows);
+      _apiSummaries ??
+      (_cachedSummaries ??= _computeSummaries(_employees, _rows));
 
   /// Called from cell onChanged. If the value ends with 'asdf', strips those
   /// 4 chars, updates [ctrl] and [dataMap][key], then adds a new row.
@@ -597,10 +619,91 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _scheduleAnalysisUpdate();
   }
 
+  // ── Month navigation ────────────────────────────────────────────────────
+
+  bool get _isViewingCurrentMonth {
+    final now = DateTime.now();
+    return _viewMonth.year == now.year && _viewMonth.month == now.month;
+  }
+
+  void _changeMonth(int delta) {
+    setState(() {
+      _viewMonth = DateTime(_viewMonth.year, _viewMonth.month + delta, 1);
+      _apiSummaries = null;
+      _cachedSummaries = null;
+      _loadingData = true;
+    });
+    _loadAttendance();
+  }
+
+  void _jumpToMonth(DateTime m) {
+    setState(() {
+      _viewMonth = DateTime(m.year, m.month, 1);
+      _apiSummaries = null;
+      _cachedSummaries = null;
+      _loadingData = true;
+    });
+    _loadAttendance();
+  }
+
+  /// Pick an Excel file and POST it to /attendance/import.
+  Future<void> _importExcel() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['xlsx', 'xls', 'csv'],
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not read file bytes')),
+        );
+      }
+      return;
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Uploading…'), duration: Duration(seconds: 2)),
+      );
+    }
+
+    try {
+      final res = await _api.importAttendance(
+          bytes: bytes, filename: file.name);
+      final data = res.data as Map<String, dynamic>? ?? {};
+      final imported  = data['imported']         as int?    ?? 0;
+      final unmatched = (data['unmatched_users'] as List?)?.cast<String>() ?? [];
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(unmatched.isEmpty
+                ? 'Imported $imported records'
+                : 'Imported $imported records · Unmatched: ${unmatched.join(", ")}'),
+          ),
+        );
+      }
+      // Reload everything from the server so the grid reflects the import
+      _loadAttendance();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Import failed: $e')),
+        );
+      }
+    }
+  }
+
   /// Schedule an analysis refresh 600 ms after the last keystroke.
   void _scheduleAnalysisUpdate() {
     _analysisDebounce?.cancel();
     _scheduleSave();
+    // Drop server summary so the local fallback (which reflects the user's
+    // in-progress edits) is shown until the next save lands.
+    _apiSummaries = null;
     _analysisDebounce = Timer(const Duration(milliseconds: 600), () {
       if (mounted) {
         setState(() { _cachedSummaries = null; });
@@ -636,17 +739,29 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               const Text('Attendance',
                   style: TextStyle(
                       fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(width: 20),
+              // ── Month navigator ──────────────────────────────────────────
+              _MonthNav(
+                month:   _viewMonth,
+                onPrev:  () => _changeMonth(-1),
+                onNext:  () => _changeMonth(1),
+                onToday: _isViewingCurrentMonth ? null : () => _jumpToMonth(
+                    DateTime(DateTime.now().year, DateTime.now().month, 1)),
+              ),
               const Spacer(),
-              FilledButton.icon(
-                onPressed: _addRow,
-                icon: const Icon(Icons.add, size: 16),
-                label: const Text('Add Row',
+              OutlinedButton.icon(
+                onPressed: _importExcel,
+                icon: const Icon(Icons.upload_file_rounded, size: 14),
+                label: const Text('Import Excel',
                     style: TextStyle(fontSize: 13)),
-                style: FilledButton.styleFrom(
-                  backgroundColor: _kAccent,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF6366F1),
+                  side: const BorderSide(color: Color(0xFF6366F1)),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
                   padding: const EdgeInsets.symmetric(
                       horizontal: 14, vertical: 10),
-                  minimumSize: Size.zero,
+                  minimumSize:   Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
               ),
@@ -1066,41 +1181,111 @@ class _AnalysisPanel extends StatelessWidget {
         .map((s) => s.totalHours)
         .fold(0.0, (a, b) => a > b ? a : b);
 
+    // Team aggregate strip
+    final teamHours  = summaries.fold<double>(0, (a, s) => a + s.totalHours);
+    final teamDays   = summaries.fold<int>(0, (a, s) => a + s.daysPresent);
+    final teamLeaves = summaries.fold<int>(0, (a, s) => a + s.leaves);
+
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Summary',
-              style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: _kPrimary)),
-          const SizedBox(height: 12),
+          // ── Section header ──────────────────────────────────────────────
+          Row(children: [
+            const Icon(Icons.insights_rounded, size: 16, color: _kAccent),
+            const SizedBox(width: 6),
+            const Text('Team Summary',
+                style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: _kPrimary)),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color:        const Color(0xFFF0F2F8),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.schedule_rounded, size: 11, color: Color(0xFF6B7280)),
+                const SizedBox(width: 4),
+                Text(_fmtHours(teamHours),
+                    style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF6B7280))),
+                const SizedBox(width: 8),
+                Container(width: 1, height: 10, color: const Color(0xFFD1D5DB)),
+                const SizedBox(width: 8),
+                Text('${teamDays}d',
+                    style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF10B981))),
+                const SizedBox(width: 6),
+                Text('·',
+                    style: TextStyle(fontSize: 11, color: Colors.grey[400])),
+                const SizedBox(width: 6),
+                Text('${teamLeaves}L',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: _kAccent)),
+              ]),
+            ),
+          ]),
+          const SizedBox(height: 16),
+
           // ── Stat cards 2-column grid ────────────────────────────────────
-          GridView.count(
-            crossAxisCount: 2,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisSpacing: 8,
-            mainAxisSpacing: 8,
-            childAspectRatio: 2.4,
-            children: summaries.map((s) => _StatCard(s)).toList(),
+          LayoutBuilder(
+            builder: (context, c) {
+              final cols = c.maxWidth < 480 ? 1 : 2;
+              return GridView.count(
+                crossAxisCount: cols,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: cols == 1 ? 3.8 : 2.0,
+                children: summaries.map((s) => _StatCard(s)).toList(),
+              );
+            },
           ),
-          const SizedBox(height: 20),
-          // ── Bar chart ──────────────────────────────────────────────────
-          const Text('Total Hours',
-              style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: _kPrimary)),
-          const SizedBox(height: 10),
-          ...summaries.map((s) => _BarRow(s, maxH)),
+          const SizedBox(height: 24),
+
+          // ── Bar chart section ──────────────────────────────────────────
+          Row(children: [
+            const Icon(Icons.bar_chart_rounded, size: 14, color: _kPrimary),
+            const SizedBox(width: 6),
+            const Text('Total Hours',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: _kPrimary,
+                    letterSpacing: 0.3)),
+          ]),
           const SizedBox(height: 12),
-          Text(
-            'Holidays (fully empty rows) excluded. '
-            'Avg/day calculated only on days where logout was recorded.',
-            style: TextStyle(fontSize: 10, color: Colors.grey[500]),
+          ...summaries.map((s) => _BarRow(s, maxH)),
+
+          const SizedBox(height: 18),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color:        const Color(0xFFF9FAFB),
+              borderRadius: BorderRadius.circular(6),
+              border:       Border.all(color: _kBorder),
+            ),
+            child: Row(children: [
+              Icon(Icons.info_outline_rounded, size: 12, color: Colors.grey[500]),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Holidays (empty rows) excluded · avg/day only counts days with logout',
+                  style: TextStyle(fontSize: 10, color: Colors.grey[600], height: 1.4),
+                ),
+              ),
+            ]),
           ),
         ],
       ),
@@ -1116,50 +1301,123 @@ class _StatCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final hh = s.totalHours.floor();
     final mm = ((s.totalHours - hh) * 60).round();
+    final initials = s.name.isEmpty ? '?' : s.name[0].toUpperCase();
+    final properName = s.name.isEmpty
+        ? ''
+        : s.name[0] + s.name.substring(1).toLowerCase();
 
     return Container(
-      // Less vertical padding — card content is compact, no need for tall spacing
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: const Color.fromARGB(255, 0, 6, 18),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color.fromARGB(255, 0, 94, 255)),
+        color:        Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border:       Border.all(color: _kBorder),
+        boxShadow: [
+          BoxShadow(
+            color:      Colors.black.withValues(alpha: 0.03),
+            blurRadius: 8,
+            offset:     const Offset(0, 2),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Slightly smaller label — it's secondary info
-          Text(s.name,
-              style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w700,
-                  color: const Color.fromARGB(255, 235, 243, 247),
-                  letterSpacing: 0.5)),
-          // 22→16: the big number was forcing the card to be tall
-          RichText(
-            text: TextSpan(
-              style: const TextStyle(color: _kPrimary),
-              children: [
-                TextSpan(
-                    text: '$hh',
-                    style: const TextStyle(
-                        fontSize: 22, fontWeight: FontWeight.bold)),
-                TextSpan(
-                    text: 'h ${mm.toString().padLeft(2, '0')}m',
-                    style: const TextStyle(fontSize: 11)),
-              ],
+          // Accent top strip — person's color
+          Container(
+            height: 3,
+            decoration: BoxDecoration(
+              color: s.color,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
             ),
           ),
-          // Merged avg/day into the same chip row — removes a whole row of height
-          Row(
-            children: [
-              _Chip('${s.daysPresent}d', Colors.green),
-              const SizedBox(width: 4),
-              _Chip('${s.leaves}L', _kAccent),
-              const SizedBox(width: 4),
-              _Chip('avg ${_fmtHours(s.avgPerDay)}', Colors.blueGrey),
-            ],
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  // ── Header: avatar + name ─────────────────────────────
+                  Row(children: [
+                    Container(
+                      width: 28, height: 28,
+                      decoration: BoxDecoration(
+                        color: s.color.withValues(alpha: 0.12),
+                        shape: BoxShape.circle,
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(initials,
+                          style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: s.color)),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        properName,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: _kPrimary,
+                            letterSpacing: 0.2),
+                      ),
+                    ),
+                  ]),
+
+                  // ── Big hours number ──────────────────────────────────
+                  RichText(
+                    text: TextSpan(
+                      style: const TextStyle(color: _kPrimary),
+                      children: [
+                        TextSpan(
+                            text: '$hh',
+                            style: const TextStyle(
+                                fontSize: 26,
+                                fontWeight: FontWeight.w800,
+                                height: 1.0)),
+                        const TextSpan(
+                            text: 'h ',
+                            style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF6B7280))),
+                        TextSpan(
+                            text: mm.toString().padLeft(2, '0'),
+                            style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF6B7280))),
+                        const TextSpan(
+                            text: 'm',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF9CA3AF))),
+                      ],
+                    ),
+                  ),
+
+                  // ── Stat pills row ────────────────────────────────────
+                  Row(
+                    children: [
+                      _Chip(icon: Icons.check_circle_rounded,
+                          label: '${s.daysPresent}d',
+                          color: const Color(0xFF10B981)),
+                      const SizedBox(width: 6),
+                      _Chip(icon: Icons.event_busy_rounded,
+                          label: '${s.leaves}L',
+                          color: _kAccent),
+                      const SizedBox(width: 6),
+                      _Chip(icon: Icons.trending_up_rounded,
+                          label: _fmtHours(s.avgPerDay),
+                          color: const Color(0xFF6366F1)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -1168,21 +1426,28 @@ class _StatCard extends StatelessWidget {
 }
 
 class _Chip extends StatelessWidget {
-  final String label;
-  final Color color;
-  const _Chip(this.label, this.color);
+  final IconData icon;
+  final String   label;
+  final Color    color;
+  const _Chip({required this.icon, required this.label, required this.color});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
+        color:        color.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(4),
       ),
-      child: Text(label,
-          style: TextStyle(
-              fontSize: 9, color: color, fontWeight: FontWeight.w600)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 9, color: color),
+        const SizedBox(width: 3),
+        Text(label,
+            style: TextStyle(
+                fontSize: 10,
+                color: color,
+                fontWeight: FontWeight.w700)),
+      ]),
     );
   }
 }
@@ -1195,44 +1460,146 @@ class _BarRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final frac = maxH == 0 ? 0.0 : (s.totalHours / maxH).clamp(0.0, 1.0);
+    final properName = s.name.isEmpty
+        ? ''
+        : s.name[0] + s.name.substring(1).toLowerCase();
+
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: [
+          // Colored dot + name
+          Container(
+            width: 6, height: 6,
+            decoration: BoxDecoration(color: s.color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 8),
           SizedBox(
-            width: 78,
+            width: 72,
             child: Text(
-              s.name[0] + s.name.substring(1).toLowerCase(),
-              style: const TextStyle(fontSize: 11, color: _kPrimary),
+              properName,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: _kPrimary),
             ),
           ),
           Expanded(
             child: Stack(
               children: [
                 Container(
-                    height: 18,
-                    decoration: BoxDecoration(
-                        color: _kBg,
-                        borderRadius: BorderRadius.circular(3))),
-                FractionallySizedBox(
-                  widthFactor: frac,
-                  child: Container(
-                      height: 18,
+                  height: 10,
+                  decoration: BoxDecoration(
+                      color:        const Color(0xFFF3F4F6),
+                      borderRadius: BorderRadius.circular(5)),
+                ),
+                TweenAnimationBuilder<double>(
+                  tween:    Tween(begin: 0, end: frac),
+                  duration: const Duration(milliseconds: 700),
+                  curve:    Curves.easeOutCubic,
+                  builder: (_, v, _) => FractionallySizedBox(
+                    widthFactor: v,
+                    child: Container(
+                      height: 10,
                       decoration: BoxDecoration(
-                          color: s.color,
-                          borderRadius: BorderRadius.circular(3))),
+                        borderRadius: BorderRadius.circular(5),
+                        gradient: LinearGradient(
+                          colors: [
+                            s.color.withValues(alpha: 0.7),
+                            s.color,
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 10),
           SizedBox(
             width: 56,
             child: Text(_fmtHours(s.totalHours),
-                style: const TextStyle(fontSize: 11, color: _kPrimary),
+                style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: _kPrimary),
                 textAlign: TextAlign.right),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ─── Month navigator ─────────────────────────────────────────────────────────
+
+class _MonthNav extends StatelessWidget {
+  final DateTime       month;
+  final VoidCallback   onPrev;
+  final VoidCallback   onNext;
+  final VoidCallback?  onToday;  // null = already on current month
+
+  const _MonthNav({
+    required this.month,
+    required this.onPrev,
+    required this.onNext,
+    required this.onToday,
+  });
+
+  static const _monthNames = [
+    'January','February','March','April','May','June',
+    'July','August','September','October','November','December',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      decoration: BoxDecoration(
+        color:        _kBg,
+        borderRadius: BorderRadius.circular(8),
+        border:       Border.all(color: _kBorder),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        _iconBtn(Icons.chevron_left_rounded, onPrev),
+        SizedBox(
+          width: 130,
+          child: Text(
+            '${_monthNames[month.month - 1]} ${month.year}',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary),
+          ),
+        ),
+        _iconBtn(Icons.chevron_right_rounded, onNext),
+        if (onToday != null) ...[
+          const SizedBox(width: 4),
+          InkWell(
+            onTap: onToday,
+            borderRadius: BorderRadius.circular(6),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Text('Today',
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: _kAccent,
+                      fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  Widget _iconBtn(IconData icon, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.all(4),
+        child: Icon(icon, size: 18, color: _kPrimary),
       ),
     );
   }

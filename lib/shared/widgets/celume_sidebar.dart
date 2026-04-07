@@ -9,39 +9,51 @@ import '../../core/models/user.dart';
 
 class CelumeSidebar extends StatelessWidget {
   final User user;
+  final VoidCallback? onCollapse;
 
-  const CelumeSidebar({super.key, required this.user});
+  const CelumeSidebar({super.key, required this.user, this.onCollapse});
 
   @override
   Widget build(BuildContext context) {
-    final isSmallScreen = MediaQuery.of(context).size.width < 800;
-
-    if (isSmallScreen) {
-      return _buildDrawerContent(context);
-    }
-
-    return Container(
-      width: 260,
-      color: AppColors.sidebarBg,
-      child: _buildDrawerContent(context),
-    );
-  }
-
-  Widget _buildDrawerContent(BuildContext context) {
     final currentPath = GoRouterState.of(context).matchedLocation;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // ── Top bar: collapse button ────────────────────────────────────
+        if (onCollapse != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 12, right: 12),
+            child: Align(
+              alignment: Alignment.topRight,
+              child: InkWell(
+                onTap: onCollapse,
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color:        Colors.white.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Icon(
+                    Icons.keyboard_double_arrow_left_rounded,
+                    color: Colors.white70,
+                    size:  16,
+                  ),
+                ),
+              ),
+            ),
+          ),
+
         // ── Header ──────────────────────────────────────────────────────
-        const SizedBox(height: 40),
+        const SizedBox(height: 16),
         Center(
           child: Text(
             'CELUME OPS',
             style: TextStyle(
-              color: AppColors.accent,
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
+              color:         AppColors.accent,
+              fontSize:      22,
+              fontWeight:    FontWeight.bold,
               letterSpacing: 2,
             ),
           ),
@@ -51,7 +63,7 @@ class CelumeSidebar extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             decoration: BoxDecoration(
-              color: AppColors.accent.withValues(alpha: 0.15),
+              color:        AppColors.accent.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
@@ -68,15 +80,12 @@ class CelumeSidebar extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Dashboard — always visible
                 _NavItem(
                   icon: Icons.dashboard,
                   label: 'Dashboard',
                   isActive: currentPath == '/dashboard',
                   onTap: () => _navigate(context, '/dashboard'),
                 ),
-
-                // Tasks
                 if (user.hasPageAccess(AppConfig.pageTasks))
                   _NavItem(
                     icon: Icons.task_alt,
@@ -84,8 +93,6 @@ class CelumeSidebar extends StatelessWidget {
                     isActive: currentPath == '/tasks',
                     onTap: () => _navigate(context, '/tasks'),
                   ),
-
-                // Attendance
                 if (user.hasPageAccess(AppConfig.pageAttendance))
                   _NavItem(
                     icon: Icons.access_time,
@@ -93,8 +100,6 @@ class CelumeSidebar extends StatelessWidget {
                     isActive: currentPath == '/attendance',
                     onTap: () => _navigate(context, '/attendance'),
                   ),
-
-                // Chat
                 if (user.hasPageAccess(AppConfig.pageChat))
                   _NavItem(
                     icon: Icons.chat_bubble_outline,
@@ -102,8 +107,6 @@ class CelumeSidebar extends StatelessWidget {
                     isActive: currentPath == '/chat',
                     onTap: () => _navigate(context, '/chat'),
                   ),
-
-                // Analytics
                 if (user.hasPageAccess(AppConfig.pageAnalytics))
                   _NavItem(
                     icon: Icons.bar_chart,
@@ -111,8 +114,6 @@ class CelumeSidebar extends StatelessWidget {
                     isActive: currentPath == '/analytics',
                     onTap: () => _navigate(context, '/analytics'),
                   ),
-
-                // Clients
                 if (user.hasPageAccess(AppConfig.pageClients))
                   _NavItem(
                     icon: Icons.people_outline_rounded,
@@ -120,8 +121,6 @@ class CelumeSidebar extends StatelessWidget {
                     isActive: currentPath == '/clients',
                     onTap: () => _navigate(context, '/clients'),
                   ),
-
-                // User Management — super_admin only
                 if (user.role == UserRole.superAdmin)
                   _NavItem(
                     icon: Icons.admin_panel_settings,
@@ -147,7 +146,6 @@ class CelumeSidebar extends StatelessWidget {
   }
 
   void _navigate(BuildContext context, String path) {
-    // Close drawer on small screens
     if (MediaQuery.of(context).size.width < 800) {
       Navigator.of(context).pop();
     }
@@ -173,11 +171,15 @@ class _NavItem extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
       decoration: BoxDecoration(
-        color: isActive ? Colors.white.withValues(alpha: 0.1) : Colors.transparent,
+        color: isActive
+            ? Colors.white.withValues(alpha: 0.1)
+            : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
       ),
       child: ListTile(
-        leading: Icon(icon, color: isActive ? AppColors.accent : AppColors.navItemText, size: 20),
+        leading: Icon(icon,
+            color: isActive ? AppColors.accent : AppColors.navItemText,
+            size: 20),
         title: Text(
           label,
           style: TextStyle(
