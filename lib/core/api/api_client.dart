@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:dio/browser.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../config/app_config.dart';
 
 class ApiClient {
@@ -16,10 +17,6 @@ class ApiClient {
           receiveTimeout: const Duration(seconds: 10),
           headers: {
             'Content-Type': 'application/json',
-            // Disable browser HTTP caching — prevents 304 Not Modified with empty body
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma':        'no-cache',
-            'Expires':       '0',
           },
         )) {
     // Enable cross-origin cookies. The backend issues an HttpOnly Set-Cookie
@@ -31,17 +28,27 @@ class ApiClient {
 
     dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
-        // Cache-busting query param for GET requests on web
+        // Cache-busting query param for GET requests only — keeps POST/PUT
+        // bodies clean and avoids CORS preflight on header-based cache hints.
         if (options.method == 'GET') {
           options.queryParameters = {
             ...options.queryParameters,
             '_t': DateTime.now().millisecondsSinceEpoch.toString(),
           };
         }
+        debugPrint('[API] ${options.method} ${options.uri}');
         handler.next(options);
       },
       onError: (error, handler) {
-        if (error.response?.statusCode == 401) {
+        debugPrint('[API ERROR] ${error.requestOptions.method} '
+            '${error.requestOptions.uri} → '
+            '${error.response?.statusCode} ${error.response?.data}');
+        // Don't trigger global logout for auth endpoints — a failed login
+        // shouldn't recursively dispatch a logout event.
+        final path = error.requestOptions.path;
+        final isAuthEndpoint = path.contains('/auth/login') ||
+            path.contains('/auth/logout');
+        if (error.response?.statusCode == 401 && !isAuthEndpoint) {
           onUnauthorized?.call();
         }
         handler.next(error);
