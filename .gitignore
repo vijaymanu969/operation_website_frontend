@@ -33,6 +33,10 @@ migrate_working_dir/
 /build/
 /coverage/
 
+# Vercel — Flutter SDK is cloned at build time, never commit it
+/flutter/
+/.vercel/
+
 # Symbolication related
 app.*.symbols
 

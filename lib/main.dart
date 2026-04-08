@@ -26,7 +26,7 @@ class _CelumeOpsAppState extends State<CelumeOpsApp> {
   void initState() {
     super.initState();
     _authService = AuthService();
-    _apiClient = ApiClient(authService: _authService);
+    _apiClient = ApiClient();
     _authBloc = AuthBloc(authService: _authService, apiClient: _apiClient);
     _appRouter = AppRouter(authBloc: _authBloc);
     _authBloc.add(AuthCheckRequested());

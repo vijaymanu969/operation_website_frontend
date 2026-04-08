@@ -60,15 +60,15 @@ class TaskItem extends AppFlowyGroupItem {
   String?  backendId;     // UUID from backend
   String   title;
   String   description;
-  String   assignee;
-  String?  personId;      // UUID of assignee
-  String?  reviewerId;
-  String?  reviewerName;
+  // Multi-assignee / multi-reviewer
+  List<String> personIds;
+  List<String> assigneeNames;
+  List<String> reviewerIds;
+  List<String> reviewerNames;
   Priority priority;
   String   status;        // not_completed, reviewer, completed
   DateTime? date;         // start / due date
   DateTime? endDate;      // optional range end date
-  String   type;
   List<String>  typeIds;
   List<Map<String, dynamic>> types; // [{id, name, color}]
   List<Map<String, dynamic>> commentsList; // full comment objects from API
@@ -89,15 +89,14 @@ class TaskItem extends AppFlowyGroupItem {
     this.backendId,
     required this.title,
     this.description = '',
-    this.assignee    = '',
-    this.personId,
-    this.reviewerId,
-    this.reviewerName,
+    List<String>? personIds,
+    List<String>? assigneeNames,
+    List<String>? reviewerIds,
+    List<String>? reviewerNames,
     this.priority    = Priority.medium,
     this.status      = 'not_completed',
     this.date,
     this.endDate,
-    this.type        = 'Task',
     List<String>? typeIds,
     List<Map<String, dynamic>>? types,
     List<Map<String, dynamic>>? commentsList,
@@ -112,9 +111,20 @@ class TaskItem extends AppFlowyGroupItem {
     this.actualDays,
     this.drift,
     this.health,
-  }) : typeIds = typeIds ?? [],
-       types = types ?? [],
-       commentsList = commentsList ?? [];
+  }) : personIds     = personIds     ?? [],
+       assigneeNames = assigneeNames ?? [],
+       reviewerIds   = reviewerIds   ?? [],
+       reviewerNames = reviewerNames ?? [],
+       typeIds       = typeIds       ?? [],
+       types         = types         ?? [],
+       commentsList  = commentsList  ?? [];
+
+  // ─── Compat getters (other code reads these) ────────────────────────────
+  String get assignee     => assigneeNames.join(', ');
+  String? get personId    => personIds.isEmpty ? null : personIds.first;
+  String? get reviewerId  => reviewerIds.isEmpty ? null : reviewerIds.first;
+  String? get reviewerName=> reviewerNames.isEmpty ? null : reviewerNames.join(', ');
+  String  get type        => types.isEmpty ? '' : types.first['name'] as String? ?? '';
 
   // For backward compat with comments displayed as strings
   List<String> get comments => commentsList.map((c) => c['text'] as String? ?? '').toList();
@@ -127,37 +137,38 @@ class TaskItem extends AppFlowyGroupItem {
     final commentsRaw = (json['comments'] as List?)?.cast<Map<String, dynamic>>() ?? [];
     final status = json['status'] as String? ?? 'not_completed';
 
-    // Handle both single person_id and multi-person assignees array
+    // Multi-assignee / multi-reviewer arrays from backend
     final assignees = (json['assignees'] as List?)?.cast<Map<String, dynamic>>() ?? [];
     final reviewers = (json['reviewers'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-    final assigneeName = assignees.isNotEmpty
-        ? assignees.map((a) => a['name'] as String).join(', ')
-        : json['person_name'] as String? ?? '';
-    final assigneeId = assignees.isNotEmpty
-        ? assignees.first['id'] as String?
-        : json['person_id'] as String?;
-    final reviewerName = reviewers.isNotEmpty
-        ? reviewers.first['name'] as String?
-        : json['reviewer_name'] as String?;
-    final reviewerId = reviewers.isNotEmpty
-        ? reviewers.first['id'] as String?
-        : json['reviewer_id'] as String?;
+
+    // Fall back to single-id legacy fields if arrays are empty
+    final personIds = assignees.isNotEmpty
+        ? assignees.map((a) => a['id'] as String).toList()
+        : (json['person_id'] != null ? [json['person_id'] as String] : <String>[]);
+    final assigneeNames = assignees.isNotEmpty
+        ? assignees.map((a) => a['name'] as String).toList()
+        : (json['person_name'] != null ? [json['person_name'] as String] : <String>[]);
+    final reviewerIds = reviewers.isNotEmpty
+        ? reviewers.map((r) => r['id'] as String).toList()
+        : (json['reviewer_id'] != null ? [json['reviewer_id'] as String] : <String>[]);
+    final reviewerNames = reviewers.isNotEmpty
+        ? reviewers.map((r) => r['name'] as String).toList()
+        : (json['reviewer_name'] != null ? [json['reviewer_name'] as String] : <String>[]);
 
     return TaskItem(
-      backendId:    json['id'] as String?,
-      title:        json['title'] as String? ?? '',
-      description:  json['description'] as String? ?? '',
-      assignee:     assigneeName,
-      personId:     assigneeId,
-      reviewerId:   reviewerId,
-      reviewerName: reviewerName,
-      priority:     _parsePriority(json['priority'] as String?),
-      status:       status,
-      date:         _parseDate(json['date']),
-      endDate:      _parseDate(json['end_date']),
-      type:         typesList.isNotEmpty ? typesList.first['name'] as String : '',
-      typeIds:      typesList.map((t) => t['id'] as String).toList(),
-      types:        typesList,
+      backendId:     json['id'] as String?,
+      title:         json['title'] as String? ?? '',
+      description:   json['description'] as String? ?? '',
+      personIds:     personIds,
+      assigneeNames: assigneeNames,
+      reviewerIds:   reviewerIds,
+      reviewerNames: reviewerNames,
+      priority:      _parsePriority(json['priority'] as String?),
+      status:        status,
+      date:          _parseDate(json['date']),
+      endDate:       _parseDate(json['end_date']),
+      typeIds:       typesList.map((t) => t['id'] as String).toList(),
+      types:         typesList,
       commentsList: commentsRaw,
       isDone:       status == 'completed',
       columnGroup:  json['column_group'] as String?,
@@ -399,13 +410,15 @@ class _TasksScreenState extends State<TasksScreen> {
   Future<void> _loadTasks() async {
     setState(() => _loadingTasks = true);
     try {
+      // Person and Captain are two distinct filters — person_ids matches
+      // assignees only, reviewer_ids matches captains only. Do NOT merge.
       final filters = <String, dynamic>{};
-      if (_filterPerson   != null) filters['person_id']   = _filterPerson;
-      if (_filterReviewer != null) filters['reviewer_id'] = _filterReviewer;
-      if (_filterType     != null) filters['type_id']     = _filterType;
-      if (_filterPriority != null) filters['priority']    = _filterPriority!.apiValue;
-      if (_filterStatus   != null) filters['status']      = _filterStatus;
-      if (_filterHealth   != null) filters['health']      = _filterHealth;
+      if (_filterPerson   != null) filters['person_ids']   = _filterPerson;
+      if (_filterReviewer != null) filters['reviewer_ids'] = _filterReviewer;
+      if (_filterType     != null) filters['type_ids']     = _filterType;
+      if (_filterPriority != null) filters['priorities']   = _filterPriority!.apiValue;
+      if (_filterStatus   != null) filters['statuses']     = _filterStatus;
+      if (_filterHealth   != null) filters['healths']      = _filterHealth;
 
       final res = await _api.getTasks(filters: filters.isEmpty ? null : filters);
       final tasks = (res.data as List)
@@ -733,6 +746,7 @@ class _TasksScreenState extends State<TasksScreen> {
                       _loadTasks();
                     },
                     typeOptions:   _taskTypeOpts,
+                    users:         _users,
                     currentUserId: (context.read<AuthBloc>().state is AuthAuthenticated)
                         ? (context.read<AuthBloc>().state as AuthAuthenticated).user.id
                         : null,
@@ -1901,19 +1915,46 @@ class _TaskCard extends StatelessWidget {
             // ── Row 4: assignee + reviewer + meta chips ───────────────────
             Row(
               children: [
-                if (item.assignee.isNotEmpty) ...[
-                  _AssigneeAvatar(item.assignee),
+                if (item.assigneeNames.isNotEmpty) ...[
+                  _AssigneeAvatar(item.assigneeNames.first),
                   const SizedBox(width: 5),
-                  Text(item.assignee,
-                      style: const TextStyle(fontSize: 11, color: _kMuted)),
+                  Flexible(
+                    child: Text(
+                      item.assigneeNames.first,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11, color: _kMuted),
+                    ),
+                  ),
+                  if (item.assigneeNames.length > 1) ...[
+                    const SizedBox(width: 3),
+                    Text('+${item.assigneeNames.length - 1}',
+                        style: const TextStyle(
+                            fontSize: 10,
+                            color: _kMuted,
+                            fontWeight: FontWeight.w600)),
+                  ],
                 ],
-                if (item.reviewerName != null && item.reviewerName!.isNotEmpty) ...[
+                if (item.reviewerNames.isNotEmpty) ...[
                   const SizedBox(width: 8),
                   const Icon(Icons.shield_outlined, size: 11, color: _kMuted),
                   const SizedBox(width: 3),
-                  Text(item.reviewerName!,
-                      style: const TextStyle(fontSize: 11, color: _kMuted)),
+                  Flexible(
+                    child: Text(
+                      item.reviewerNames.first,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11, color: _kMuted),
+                    ),
+                  ),
+                  if (item.reviewerNames.length > 1) ...[
+                    const SizedBox(width: 3),
+                    Text('+${item.reviewerNames.length - 1}',
+                        style: const TextStyle(
+                            fontSize: 10,
+                            color: _kMuted,
+                            fontWeight: FontWeight.w600)),
+                  ],
                 ],
+                const SizedBox(width: 8),
                 const Spacer(),
                 if (item.comments.isNotEmpty) ...[
                   _MetaChip(
@@ -2026,6 +2067,7 @@ class _TaskDetailPanel extends StatefulWidget {
   final VoidCallback onChanged;
   final VoidCallback? onDeleted;
   final List<SelectOption> typeOptions;
+  final List<Map<String, dynamic>> users;
   final String? currentUserId;
 
   const _TaskDetailPanel({
@@ -2035,6 +2077,7 @@ class _TaskDetailPanel extends StatefulWidget {
     required this.onChanged,
     this.onDeleted,
     this.typeOptions    = const [],
+    this.users          = const [],
     this.currentUserId,
   });
 
@@ -2052,6 +2095,25 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   Timer? _debounce;
 
   late final List<SelectOption> _typeOpts = List<SelectOption>.from(widget.typeOptions);
+
+  // Build SelectOption list for the user pickers (Person / Captain) using
+  // the same color mapping the New Task dialog uses.
+  List<SelectOption> get _userOpts => widget.users.map((u) => SelectOption(
+        id:    u['id'] as String,
+        name:  u['name'] as String,
+        color: _userColor(u['color'] as String? ?? 'gray'),
+      )).toList();
+
+  static SelectOptionColor _userColor(String c) => switch (c) {
+    'purple' => SelectOptionColor.purple,
+    'pink'   => SelectOptionColor.pink,
+    'blue'   => SelectOptionColor.blue,
+    'green'  => SelectOptionColor.green,
+    'orange' => SelectOptionColor.orange,
+    'red'    => SelectOptionColor.pink,
+    'yellow' => SelectOptionColor.orange,
+    _        => SelectOptionColor.gray,
+  };
 
   // Comments loaded from API
   List<Map<String, dynamic>> _comments    = [];
@@ -2092,15 +2154,48 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     super.dispose();
   }
 
-  // Save immediately
+  // Save immediately. After the update, re-sync the in-memory TaskItem from
+  // the server's response so the UI always reflects the persisted truth
+  // (e.g. multi-assignee/multi-type arrays the backend may dedupe or reorder).
   Future<void> _saveField(Map<String, dynamic> data) async {
     final id = widget.item.backendId;
     if (id == null) return;
     try {
-      await context.read<ApiClient>().updateTask(id, data);
+      final res = await context.read<ApiClient>().updateTask(id, data);
+      if (!mounted) return;
+      final json = res.data;
+      if (json is Map<String, dynamic>) {
+        _syncFromJson(json);
+      }
     } catch (_) {
       // silent — user sees their change; they can retry if needed
     }
+  }
+
+  /// Patch the existing TaskItem with fresh server data without replacing
+  /// the instance (the parent kanban references the same object).
+  void _syncFromJson(Map<String, dynamic> json) {
+    final fresh = TaskItem.fromJson(json);
+    setState(() {
+      final item = widget.item;
+      item.title          = fresh.title;
+      item.description    = fresh.description;
+      item.personIds      = fresh.personIds;
+      item.assigneeNames  = fresh.assigneeNames;
+      item.reviewerIds    = fresh.reviewerIds;
+      item.reviewerNames  = fresh.reviewerNames;
+      item.priority       = fresh.priority;
+      item.status         = fresh.status;
+      item.date           = fresh.date;
+      item.endDate        = fresh.endDate;
+      item.typeIds        = fresh.typeIds;
+      item.types          = fresh.types;
+      item.isDone         = fresh.isDone;
+      item.columnGroup    = fresh.columnGroup;
+      item.isPaused       = fresh.isPaused;
+      item.pendingPauseRequest = fresh.pendingPauseRequest;
+    });
+    widget.onChanged();
   }
 
   // Save after 600 ms of inactivity (for text fields)
@@ -2734,72 +2829,133 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                 ),
                 const SizedBox(height: 14),
 
-                // ── Person (Assignee) ──────────────────────────────────────
-                _PanelRow(
-                  icon:  Icons.person_outline_rounded,
-                  label: 'Person',
-                  child: item.assignee.isEmpty
-                      ? const Text('Unassigned',
-                          style: TextStyle(fontSize: 12, color: _kMuted))
-                      : Row(children: [
-                          _AssigneeAvatar(item.assignee, radius: 12),
-                          const SizedBox(width: 8),
-                          Text(item.assignee,
-                              style: const TextStyle(
-                                  fontSize: 12, color: _kPrimary)),
-                        ]),
+                // ── Person (Assignee) — multi-select ──────────────────────
+                SelectOptionField(
+                  label:           'Person',
+                  options:         _userOpts,
+                  selectedOptions: item.personIds,
+                  onOptionSelected: (id) {
+                    setState(() {
+                      if (item.personIds.contains(id)) {
+                        // Toggle off
+                        final idx = item.personIds.indexOf(id);
+                        item.personIds.removeAt(idx);
+                        if (idx < item.assigneeNames.length) {
+                          item.assigneeNames.removeAt(idx);
+                        }
+                      } else {
+                        // Toggle on
+                        final u = widget.users.firstWhere(
+                          (x) => x['id'] == id,
+                          orElse: () => const {},
+                        );
+                        item.personIds.add(id);
+                        item.assigneeNames.add((u['name'] as String?) ?? '');
+                      }
+                    });
+                    widget.onChanged();
+                    _saveField({'person_ids': item.personIds});
+                  },
+                  onOptionCreated: (_) {},
+                  onOptionDeleted: (_) {},
                 ),
                 const SizedBox(height: 14),
 
-                // ── Reviewer (Captain) ─────────────────────────────────────
-                _PanelRow(
-                  icon:  Icons.verified_user_outlined,
-                  label: 'Captain',
-                  child: (item.reviewerName == null || item.reviewerName!.isEmpty)
-                      ? const Text('None',
-                          style: TextStyle(fontSize: 12, color: _kMuted))
-                      : Row(children: [
-                          _AssigneeAvatar(item.reviewerName!, radius: 12),
-                          const SizedBox(width: 8),
-                          Text(item.reviewerName!,
-                              style: const TextStyle(
-                                  fontSize: 12, color: _kPrimary)),
-                        ]),
+                // ── Reviewer (Captain) — multi-select ─────────────────────
+                SelectOptionField(
+                  label:           'Captain',
+                  options:         _userOpts,
+                  selectedOptions: item.reviewerIds,
+                  onOptionSelected: (id) {
+                    setState(() {
+                      if (item.reviewerIds.contains(id)) {
+                        final idx = item.reviewerIds.indexOf(id);
+                        item.reviewerIds.removeAt(idx);
+                        if (idx < item.reviewerNames.length) {
+                          item.reviewerNames.removeAt(idx);
+                        }
+                      } else {
+                        final u = widget.users.firstWhere(
+                          (x) => x['id'] == id,
+                          orElse: () => const {},
+                        );
+                        item.reviewerIds.add(id);
+                        item.reviewerNames.add((u['name'] as String?) ?? '');
+                      }
+                    });
+                    widget.onChanged();
+                    _saveField({'reviewer_ids': item.reviewerIds});
+                  },
+                  onOptionCreated: (_) {},
+                  onOptionDeleted: (_) {},
                 ),
                 const SizedBox(height: 14),
 
-                // ── Type ───────────────────────────────────────────────────
+                // ── Type — multi-select ───────────────────────────────────
                 SelectOptionField(
                   label:           'Type',
                   options:         _typeOpts,
-                  selectedOptions: item.type.isEmpty
-                      ? []
-                      : [_typeOpts.firstWhere(
-                            (o) => o.name.toLowerCase() == item.type.toLowerCase(),
-                            orElse: () => _typeOpts.first,
-                          ).id],
+                  selectedOptions: item.typeIds,
                   onOptionSelected: (id) {
-                    final opt = _typeOpts.firstWhere((o) => o.id == id, orElse: () => _typeOpts.first);
-                    setState(() => item.type = opt.name);
-                    widget.onChanged();
-                  },
-                  onOptionCreated: (name) {
                     setState(() {
-                      _typeOpts.add(SelectOption(
-                        id:    name.toLowerCase().replaceAll(' ', '_'),
-                        name:  name,
-                        color: SelectOptionColor.gray,
-                      ));
-                      item.type = name;
+                      if (item.typeIds.contains(id)) {
+                        // Toggle off
+                        item.typeIds.remove(id);
+                        item.types.removeWhere((t) => t['id'] == id);
+                      } else {
+                        // Toggle on
+                        final opt = _typeOpts.firstWhere(
+                          (o) => o.id == id,
+                          orElse: () => _typeOpts.first,
+                        );
+                        item.typeIds.add(id);
+                        item.types.add({
+                          'id':    opt.id,
+                          'name':  opt.name,
+                        });
+                      }
                     });
                     widget.onChanged();
+                    _saveField({'type_ids': item.typeIds});
+                  },
+                  onOptionCreated: (name) async {
+                    // Persist new type to backend, then assign it to this task
+                    try {
+                      final res = await context.read<ApiClient>().createTaskType({
+                        'name':  name,
+                        'color': 'gray',
+                      });
+                      if (!mounted) return;
+                      final created = res.data as Map<String, dynamic>;
+                      final newOpt = SelectOption(
+                        id:    created['id'] as String,
+                        name:  created['name'] as String,
+                        color: SelectOptionColor.gray,
+                      );
+                      setState(() {
+                        _typeOpts.add(newOpt);
+                        item.typeIds.add(newOpt.id);
+                        item.types.add({
+                          'id':    newOpt.id,
+                          'name':  newOpt.name,
+                          'color': 'gray',
+                        });
+                      });
+                      widget.onChanged();
+                      _saveField({'type_ids': item.typeIds});
+                    } catch (_) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Failed to create type')),
+                        );
+                      }
+                    }
                   },
                   onOptionDeleted: (id) {
                     setState(() {
-                      final removed = _typeOpts.firstWhere((o) => o.id == id,
-                          orElse: () => SelectOption(id: '', name: '', color: SelectOptionColor.gray));
-                      if (item.type == removed.name) item.type = '';
                       _typeOpts.removeWhere((o) => o.id == id);
+                      item.typeIds.remove(id);
+                      item.types.removeWhere((t) => t['id'] == id);
                     });
                     widget.onChanged();
                   },
@@ -2807,8 +2963,10 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                     setState(() {
                       final i = _typeOpts.indexWhere((o) => o.id == id);
                       if (i != -1) {
-                        if (item.type == _typeOpts[i].name) item.type = name;
                         _typeOpts[i] = _typeOpts[i].copyWith(name: name);
+                      }
+                      for (final t in item.types) {
+                        if (t['id'] == id) t['name'] = name;
                       }
                     });
                     widget.onChanged();
@@ -4032,3 +4190,4 @@ class _UserProfilePanel extends StatelessWidget {
     ]);
   }
 }
+

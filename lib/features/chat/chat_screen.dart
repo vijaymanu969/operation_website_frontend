@@ -773,6 +773,8 @@ class _ChatScreenState extends State<ChatScreen> {
         if (msg.pauseReq != null)      return _buildPauseRequestCard(msg, contact);
         if (msg.ideaReq != null)       return _buildIdeaRequestCard(msg, contact);
         if (msg.imageCaption != null)  return _buildImageMessage(msg, contact);
+        // Plain text — but skip rendering if there's nothing to show
+        if (msg.text == null || msg.text!.isEmpty) return const SizedBox.shrink();
         return _buildTextBubble(msg, contact);
       },
     );
@@ -838,7 +840,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   border: isSent ? null : Border.all(color: _kBorder),
                 ),
-                child: Text(msg.text!,
+                child: Text(msg.text ?? '',
                     style: TextStyle(
                         fontSize: 13,
                         color: isSent ? Colors.white : _kPrimary)),

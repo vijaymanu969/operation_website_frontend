@@ -77,21 +77,17 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     AuthCheckRequested event,
     Emitter<AuthState> emit,
   ) async {
-    final hasToken = await authService.hasToken();
-    if (!hasToken) {
-      emit(AuthUnauthenticated());
-      return;
-    }
-
-    // Token exists — validate it by calling /auth/me
+    // With HttpOnly cookies we can't peek at the cookie from JS/Dart, so the
+    // only way to know if the user is authenticated is to ask the server.
+    // /auth/me will succeed if the cookie is valid, 401 otherwise.
     try {
       final meResponse = await apiClient.getMe();
       final user = User.fromJson(meResponse.data as Map<String, dynamic>);
       authService.setCurrentUser(user);
       emit(AuthAuthenticated(user: user));
     } catch (_) {
-      // Token expired or invalid
-      await authService.clearSession();
+      // No cookie / expired / invalid — treat as logged out
+      authService.clearSession();
       emit(AuthUnauthenticated());
     }
   }
@@ -102,16 +98,13 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
   ) async {
     emit(AuthLoading());
     try {
-      // 1. Call POST /auth/login
-      final loginResponse = await apiClient.login(event.email, event.password);
-      final data = loginResponse.data as Map<String, dynamic>;
-      final token = data['token'] as String;
-      final loginUser = User.fromJson(data['user'] as Map<String, dynamic>);
+      // 1. POST /auth/login — backend sets the HttpOnly cookie via Set-Cookie.
+      //    The response body no longer carries a token; we don't need to read
+      //    or store it from the frontend.
+      await apiClient.login(event.email, event.password);
 
-      // 2. Save token
-      await authService.saveSession(token, loginUser);
-
-      // 3. Call GET /auth/me to get full user with page_access
+      // 2. GET /auth/me — relies on the cookie that was just set, returns the
+      //    full user with page_access.
       final meResponse = await apiClient.getMe();
       final fullUser = User.fromJson(meResponse.data as Map<String, dynamic>);
       authService.setCurrentUser(fullUser);
@@ -131,7 +124,12 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     AuthLogoutRequested event,
     Emitter<AuthState> emit,
   ) async {
-    await authService.clearSession();
+    // Tell the server to clear the cookie. We don't care if it fails (e.g.
+    // already expired) — we still drop our local user state.
+    try {
+      await apiClient.logout();
+    } catch (_) {}
+    authService.clearSession();
     emit(AuthUnauthenticated());
   }
 }

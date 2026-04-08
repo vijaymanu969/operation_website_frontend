@@ -1,18 +1,16 @@
 import 'package:dio/dio.dart';
-import '../auth/auth_service.dart';
+import 'package:dio/browser.dart';
 import '../config/app_config.dart';
 
 class ApiClient {
   final Dio dio;
-  final AuthService _authService;
 
   /// Callback to trigger logout when a 401 is received.
   /// Set by AuthBloc after construction.
   void Function()? onUnauthorized;
 
-  ApiClient({required AuthService authService})
-      : _authService = authService,
-        dio = Dio(BaseOptions(
+  ApiClient()
+      : dio = Dio(BaseOptions(
           baseUrl: AppConfig.baseUrl,
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 10),
@@ -24,12 +22,15 @@ class ApiClient {
             'Expires':       '0',
           },
         )) {
+    // Enable cross-origin cookies. The backend issues an HttpOnly Set-Cookie
+    // on /auth/login; without withCredentials the browser would never send
+    // it back on subsequent requests, and we'd never be authenticated.
+    final adapter = BrowserHttpClientAdapter();
+    adapter.withCredentials = true;
+    dio.httpClientAdapter = adapter;
+
     dio.interceptors.add(InterceptorsWrapper(
-      onRequest: (options, handler) async {
-        final token = await _authService.getToken();
-        if (token != null && token.isNotEmpty) {
-          options.headers['Authorization'] = 'Bearer $token';
-        }
+      onRequest: (options, handler) {
         // Cache-busting query param for GET requests on web
         if (options.method == 'GET') {
           options.queryParameters = {
@@ -41,7 +42,6 @@ class ApiClient {
       },
       onError: (error, handler) {
         if (error.response?.statusCode == 401) {
-          _authService.clearSession();
           onUnauthorized?.call();
         }
         handler.next(error);
@@ -56,6 +56,10 @@ class ApiClient {
       'email': email,
       'password': password,
     });
+  }
+
+  Future<Response> logout() {
+    return dio.post('/auth/logout');
   }
 
   Future<Response> getMe() {
