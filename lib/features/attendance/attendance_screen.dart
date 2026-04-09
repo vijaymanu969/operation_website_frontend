@@ -282,11 +282,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   Future<void> _loadAttendance() async {
     setState(() => _loadingData = true);
     try {
-      // 1. Load users to build dynamic employee list
-      final usersRes = await _api.getUsers();
+      // 1. Load users via the directory endpoint — no PII, callable by any
+      //    authenticated user (workers/interns included).
+      final usersRes = await _api.getUserDirectory();
       final users = (usersRes.data as List).cast<Map<String, dynamic>>();
       _employees = users
-          .where((u) => u['is_active'] == true)
           .map((u) => (u['name'] as String).toUpperCase())
           .toList();
       _employeeIds = {
