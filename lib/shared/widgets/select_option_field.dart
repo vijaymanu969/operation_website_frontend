@@ -45,7 +45,7 @@ class SelectOptionField extends StatefulWidget {
 
   final void Function(String id)                        onOptionSelected;
   final void Function(String name)                      onOptionCreated;
-  final void Function(String id)                        onOptionDeleted;
+  final void Function(String id)?                       onOptionDeleted;
   final void Function(String id, String name)?          onOptionRenamed;
   final void Function(String id, SelectOptionColor c)?  onOptionColorChanged;
 
@@ -56,7 +56,7 @@ class SelectOptionField extends StatefulWidget {
     required this.selectedOptions,
     required this.onOptionSelected,
     required this.onOptionCreated,
-    required this.onOptionDeleted,
+    this.onOptionDeleted,
     this.onOptionRenamed,
     this.onOptionColorChanged,
   });
@@ -121,7 +121,8 @@ class _SelectOptionFieldState extends State<SelectOptionField> {
         onClose:       _close,
         onSelect:      _handleSelect,
         onCreate:      _handleCreate,
-        onDelete:      _handleDelete,
+        // Only forward delete if the caller actually supplied a handler.
+        onDelete:      widget.onOptionDeleted != null ? _handleDelete : null,
         onRename:      _handleRename,
         onColorChange: _handleColorChange,
       ),
@@ -168,9 +169,10 @@ class _SelectOptionFieldState extends State<SelectOptionField> {
   }
 
   void _handleDelete(String id) {
+    if (widget.onOptionDeleted == null) return;
     _opts.removeWhere((o) => o.id == id);
     _selIds.remove(id);
-    widget.onOptionDeleted(id);
+    widget.onOptionDeleted!(id);
     _refresh();
   }
 
@@ -245,7 +247,7 @@ class _DropdownPopup extends StatefulWidget {
   final VoidCallback       onClose;
   final void Function(String)                    onSelect;
   final void Function(String)                    onCreate;
-  final void Function(String)                    onDelete;
+  final void Function(String)?                   onDelete;
   final void Function(String, String)            onRename;
   final void Function(String, SelectOptionColor) onColorChange;
 
@@ -257,7 +259,7 @@ class _DropdownPopup extends StatefulWidget {
     required this.onClose,
     required this.onSelect,
     required this.onCreate,
-    required this.onDelete,
+    this.onDelete,
     required this.onRename,
     required this.onColorChange,
   });
@@ -422,7 +424,9 @@ class _DropdownPopupState extends State<_DropdownPopup> {
                             option:     opt,
                             isSelected: widget.selIds.contains(opt.id),
                             onTap:      () => widget.onSelect(opt.id),
-                            onDelete:   () => widget.onDelete(opt.id),
+                            onDelete:   widget.onDelete != null
+                                ? () => widget.onDelete!(opt.id)
+                                : null,
                             onRename:   (n) => widget.onRename(opt.id, n),
                             onColor:    (c) => widget.onColorChange(opt.id, c),
                           )),
@@ -492,7 +496,7 @@ class _OptionRow extends StatefulWidget {
   final SelectOption                     option;
   final bool                             isSelected;
   final VoidCallback                     onTap;
-  final VoidCallback                     onDelete;
+  final VoidCallback?                    onDelete;
   final void Function(String)            onRename;
   final void Function(SelectOptionColor) onColor;
 
@@ -501,7 +505,7 @@ class _OptionRow extends StatefulWidget {
     required this.option,
     required this.isSelected,
     required this.onTap,
-    required this.onDelete,
+    this.onDelete,
     required this.onRename,
     required this.onColor,
   });
@@ -532,15 +536,16 @@ class _OptionRowState extends State<_OptionRow> {
           ),
           const SizedBox(width: 6),
 
-          // X delete button
-          GestureDetector(
-            onTap: widget.onDelete,
-            child: Padding(
-              padding: const EdgeInsets.all(4),
-              child: Icon(Icons.close_rounded,
-                  size: 16, color: Colors.grey[400]),
+          // X delete button — hidden when onDelete is null
+          if (widget.onDelete != null)
+            GestureDetector(
+              onTap: widget.onDelete,
+              child: Padding(
+                padding: const EdgeInsets.all(4),
+                child: Icon(Icons.close_rounded,
+                    size: 16, color: Colors.grey[400]),
+              ),
             ),
-          ),
         ]),
       ),
     );

@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:ui' show ImageFilter;
 import 'dart:math' show min;
+import '../../core/socket/socket_service.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:appflowy_board/appflowy_board.dart';
+import 'package:fl_chart/fl_chart.dart';
 import '../../core/api/api_client.dart';
 import '../../core/auth/auth_bloc.dart';
 import '../../core/auth/user_role.dart';
@@ -84,6 +86,10 @@ class TaskItem extends AppFlowyGroupItem {
   int?     actualDays;
   int?     drift;
   String?  health;
+  // Deadline fields
+  bool     isOverdue;
+  int      daysOverdue;
+  int?     daysUntilDue;
 
   TaskItem({
     this.backendId,
@@ -111,6 +117,9 @@ class TaskItem extends AppFlowyGroupItem {
     this.actualDays,
     this.drift,
     this.health,
+    this.isOverdue    = false,
+    this.daysOverdue  = 0,
+    this.daysUntilDue,
   }) : personIds     = personIds     ?? [],
        assigneeNames = assigneeNames ?? [],
        reviewerIds   = reviewerIds   ?? [],
@@ -181,6 +190,9 @@ class TaskItem extends AppFlowyGroupItem {
       actualDays:   json['actual_days'] as int?,
       drift:        json['drift'] as int?,
       health:       json['health'] as String?,
+      isOverdue:    json['is_overdue']    as bool? ?? false,
+      daysOverdue:  json['days_overdue']  as int?  ?? 0,
+      daysUntilDue: json['days_until_due'] as int?,
     );
   }
 
@@ -238,16 +250,22 @@ class _TasksScreenState extends State<TasksScreen> {
   Priority? _filterPriority;
   String?   _filterStatus;    // 'not_completed' | 'reviewer' | 'completed' | 'idea'
   String?   _filterHealth;    // 'active' | 'at_risk' | 'stagnant' | 'dead'
+  bool      _filterOverdue = false;
 
   bool get _hasActiveFilter =>
       _filterPerson != null || _filterReviewer != null ||
       _filterType != null || _filterPriority != null ||
-      _filterStatus != null || _filterHealth != null;
+      _filterStatus != null || _filterHealth != null ||
+      _filterOverdue;
 
-  // ── Profile panel ────────────────────────────────────────────────────────
+  // ── Profile panel (admin: selected person) ───────────────────────────────
   String?               _profileUserId;
   Map<String, dynamic>? _profileData;
   bool                  _profileLoading = false;
+
+  // ── Self-profile panel (worker / intern: always shown) ───────────────────
+  Map<String, dynamic>? _myProfileData;
+  bool                  _myProfileLoading = false;
 
   Future<void> _loadProfile(String userId) async {
     setState(() {
@@ -271,6 +289,18 @@ class _TasksScreenState extends State<TasksScreen> {
       _profileData    = null;
       _profileLoading = false;
     });
+  }
+
+  Future<void> _loadMyProfile() async {
+    setState(() => _myProfileLoading = true);
+    try {
+      final res = await _api.getMyUserSummary();
+      if (mounted) setState(() => _myProfileData = res.data as Map<String, dynamic>);
+    } catch (_) {
+      if (mounted) setState(() => _myProfileData = null);
+    } finally {
+      if (mounted) setState(() => _myProfileLoading = false);
+    }
   }
 
   // ── Bulk select ──────────────────────────────────────────────────────────
@@ -337,7 +367,10 @@ class _TasksScreenState extends State<TasksScreen> {
     }
   }
 
-  ApiClient get _api => context.read<ApiClient>();
+  ApiClient     get _api    => context.read<ApiClient>();
+  SocketService get _socket => context.read<SocketService>();
+
+  StreamSubscription<Map<String, dynamic>>? _notifSub;
 
   @override
   void initState() {
@@ -353,6 +386,10 @@ class _TasksScreenState extends State<TasksScreen> {
     _loadTasks();
     _loadTaskTypes();
     _loadUsers();
+    _notifSub = _socket.onNotification.listen((_) => _loadTasks());
+
+    // Workers / interns always see their own analytics panel on the right.
+    if (!_isAdminUser(context)) _loadMyProfile();
   }
 
   Future<void> _loadUsers() async {
@@ -419,6 +456,7 @@ class _TasksScreenState extends State<TasksScreen> {
       if (_filterPriority != null) filters['priorities']   = _filterPriority!.apiValue;
       if (_filterStatus   != null) filters['statuses']     = _filterStatus;
       if (_filterHealth   != null) filters['healths']      = _filterHealth;
+      if (_filterOverdue)          filters['overdue']      = 'true';
 
       final res = await _api.getTasks(filters: filters.isEmpty ? null : filters);
       final tasks = (res.data as List)
@@ -501,6 +539,7 @@ class _TasksScreenState extends State<TasksScreen> {
 
   @override
   void dispose() {
+    _notifSub?.cancel();
     _boardCtrl.dispose();
     super.dispose();
   }
@@ -541,9 +580,9 @@ class _TasksScreenState extends State<TasksScreen> {
             setState(() => _filterPerson = v);
             _loadTasks();
             if (_isAdminUser(context)) {
-              if (v != null) {
-                _loadProfile(v);
-              } else {
+              if (v != null && v != _profileUserId) {
+                _loadProfile(v);   // only fetch when the selected person changes
+              } else if (v == null) {
                 _clearProfile();
               }
             }
@@ -561,6 +600,7 @@ class _TasksScreenState extends State<TasksScreen> {
               _filterPriority = null;
               _filterStatus   = null;
               _filterHealth   = null;
+              _filterOverdue  = false;
             });
             _clearProfile();
             _loadTasks();
@@ -671,14 +711,31 @@ class _TasksScreenState extends State<TasksScreen> {
                   ),
                 ),
               ),
-              // ── Profile panel (admin only, when person filter is set) ───
+              // ── Profile panel ───────────────────────────────────────────
+              // Admin: shown when a person filter is selected.
+              // Worker/intern: always shown with their own data.
               if (_profileUserId != null)
                 _UserProfilePanel(
-                  loading: _profileLoading,
-                  data:    _profileData,
+                  loading:      _profileLoading,
+                  data:         _profileData,
                   onClose: () {
-                    setState(() => _filterPerson = null);
+                    setState(() { _filterPerson = null; _filterOverdue = false; });
                     _clearProfile();
+                    _loadTasks();
+                  },
+                  onOverdueTap: () {
+                    setState(() => _filterOverdue = true);
+                    _loadTasks();
+                  },
+                )
+              else if (!_isAdminUser(context))
+                _UserProfilePanel(
+                  loading:      _myProfileLoading,
+                  data:         _myProfileData,
+                  showClose:    false,
+                  onClose:      () {},
+                  onOverdueTap: () {
+                    setState(() => _filterOverdue = true);
                     _loadTasks();
                   },
                 ),
@@ -963,7 +1020,6 @@ class _TasksScreenState extends State<TasksScreen> {
                       },
                       // People come from /users — not creatable/editable here
                       onOptionCreated:      (_) {},
-                      onOptionDeleted:      (_) {},
                       onOptionRenamed:      (_, _) {},
                       onOptionColorChanged: (_, _) {},
                     ),
@@ -990,7 +1046,6 @@ class _TasksScreenState extends State<TasksScreen> {
                         });
                       },
                       onOptionCreated:      (_) {},
-                      onOptionDeleted:      (_) {},
                       onOptionRenamed:      (_, _) {},
                       onOptionColorChanged: (_, _) {},
                     ),
@@ -1071,28 +1126,6 @@ class _TasksScreenState extends State<TasksScreen> {
                           if (mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(content: Text('Failed to create type: $e')),
-                            );
-                          }
-                        }
-                      },
-                      onOptionDeleted: (id) async {
-                        try {
-                          await _api.deleteTaskType(id);
-                          setDlg(() {
-                            final removed = dialogTypeOpts.firstWhere(
-                                (o) => o.id == id,
-                                orElse: () => SelectOption(id: '', name: '', color: SelectOptionColor.gray));
-                            if (selectedType == removed.name) selectedType = '';
-                            selectedTypeIds.remove(id);
-                            dialogTypeOpts.removeWhere((o) => o.id == id);
-                          });
-                          if (mounted) {
-                            setState(() => _taskTypeOpts.removeWhere((o) => o.id == id));
-                          }
-                        } catch (e) {
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('Failed to delete type: $e')),
                             );
                           }
                         }
@@ -1671,10 +1704,7 @@ class _ColumnHeader extends StatelessWidget {
             ],
           ),
         ),
-        addIcon: Padding(
-          padding: const EdgeInsets.only(right: 10),
-          child: Icon(Icons.add, size: 16, color: _kMuted),
-        ),
+        addIcon: const SizedBox.shrink(),
       ),
     );
   }
@@ -1797,6 +1827,52 @@ class _HealthDot extends StatelessWidget {
   }
 }
 
+class _DeadlineChip extends StatelessWidget {
+  final TaskItem item;
+  const _DeadlineChip({required this.item});
+
+  static String _fmt(DateTime d) {
+    const m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return '${m[d.month - 1]} ${d.day}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (item.isOverdue) {
+      final label = item.daysOverdue == 1 ? '1d late' : '${item.daysOverdue}d late';
+      return _colored(Icons.warning_amber_rounded, label, const Color(0xFFEF4444));
+    }
+    if (item.daysUntilDue == 0) {
+      return _colored(Icons.today_rounded, 'Due today', const Color(0xFFF59E0B));
+    }
+    if (item.daysUntilDue == 1) {
+      return _colored(Icons.today_rounded, 'Due tmrw',  const Color(0xFFF97316));
+    }
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      const Icon(Icons.calendar_today_outlined, size: 11, color: _kMuted),
+      const SizedBox(width: 3),
+      Text(_fmt(item.date!), style: const TextStyle(fontSize: 11, color: _kMuted)),
+    ]);
+  }
+
+  Widget _colored(IconData icon, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        color:        color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 11, color: color),
+        const SizedBox(width: 3),
+        Text(label,
+            style: TextStyle(
+                fontSize: 10, fontWeight: FontWeight.w600, color: color)),
+      ]),
+    );
+  }
+}
+
 class _MetaChip extends StatelessWidget {
   final IconData icon;
   final String   text;
@@ -1836,17 +1912,23 @@ class _TaskCard extends StatelessWidget {
         margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color:        item.isPaused ? const Color(0xFFFFFBEB) : _kSurface,
+          color: item.isPaused
+              ? const Color(0xFFFFFBEB)
+              : item.isOverdue
+                  ? const Color(0xFFFFF5F5)
+                  : _kSurface,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: isSelected
                 ? _kAccent
                 : item.isPaused
                     ? const Color(0xFFF59E0B)
-                    : _kBorder,
-            width: isSelected ? 1.5 : item.isPaused ? 1.5 : 1,
+                    : item.isOverdue
+                        ? const Color(0xFFEF4444)
+                        : _kBorder,
+            width: isSelected || item.isPaused || item.isOverdue ? 1.5 : 1,
           ),
-          boxShadow: item.isPaused ? [] : [
+          boxShadow: item.isPaused || item.isOverdue ? [] : [
             BoxShadow(
               color:      Colors.black.withValues(alpha: 0.04),
               blurRadius: 6,
@@ -1964,10 +2046,7 @@ class _TaskCard extends StatelessWidget {
                   const SizedBox(width: 8),
                 ],
                 if (item.date != null)
-                  _MetaChip(
-                    icon: Icons.calendar_today_outlined,
-                    text: _fmtDate(item.date!),
-                  ),
+                  _DeadlineChip(item: item),
               ],
             ),
           ],
@@ -2243,12 +2322,36 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   }
 
   // Build the status action widget:
-  //   not_completed → "Submit for Review" button
-  //   reviewer      → pending pill + note
+  //   not_completed → "Submit for Review" button (assignee only)
+  //   reviewer      → captain sees "Mark as Complete" button; assignee sees "In Review" pill
   //   completed     → green completed pill
   Widget _buildStatusAction(TaskItem item) {
+    final isReviewer = widget.currentUserId != null &&
+        item.reviewerIds.contains(widget.currentUserId);
+
     switch (item.status) {
       case 'reviewer':
+        if (isReviewer) {
+          // Captain sees "Mark as Complete" button
+          return Material(
+            color:        _kDone,
+            borderRadius: BorderRadius.circular(6),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: _markComplete,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.check_circle_rounded, size: 12, color: Colors.white),
+                  SizedBox(width: 6),
+                  Text('Mark as Complete',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white)),
+                ]),
+              ),
+            ),
+          );
+        }
+        // Assignee sees "In Review" pill
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: BoxDecoration(
@@ -2281,7 +2384,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
         );
 
       default:
-        // not_completed → show Submit button
+        // not_completed → show Submit button (assignee)
         return Material(
           color:        _kAccent,
           borderRadius: BorderRadius.circular(6),
@@ -2317,6 +2420,31 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       setState(() => item.status = 'not_completed');
       messenger.showSnackBar(
         const SnackBar(content: Text('Failed to submit for review')),
+      );
+    }
+  }
+
+  Future<void> _markComplete() async {
+    final item  = widget.item;
+    final api   = context.read<ApiClient>();
+    final messenger = ScaffoldMessenger.of(context);
+
+    // Optimistic update
+    setState(() {
+      item.status = 'completed';
+      item.isDone = true;
+    });
+    try {
+      await api.changeTaskStatus(item.id, 'completed');
+      widget.onChanged();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        item.status = 'reviewer';
+        item.isDone = false;
+      });
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Failed to mark task as complete')),
       );
     }
   }
@@ -2857,7 +2985,6 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                     _saveField({'person_ids': item.personIds});
                   },
                   onOptionCreated: (_) {},
-                  onOptionDeleted: (_) {},
                 ),
                 const SizedBox(height: 14),
 
@@ -2887,7 +3014,6 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                     _saveField({'reviewer_ids': item.reviewerIds});
                   },
                   onOptionCreated: (_) {},
-                  onOptionDeleted: (_) {},
                 ),
                 const SizedBox(height: 14),
 
@@ -2950,14 +3076,6 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                         );
                       }
                     }
-                  },
-                  onOptionDeleted: (id) {
-                    setState(() {
-                      _typeOpts.removeWhere((o) => o.id == id);
-                      item.typeIds.remove(id);
-                      item.types.removeWhere((t) => t['id'] == id);
-                    });
-                    widget.onChanged();
                   },
                   onOptionRenamed: (id, name) {
                     setState(() {
@@ -3882,11 +4000,15 @@ class _UserProfilePanel extends StatelessWidget {
   final bool                  loading;
   final Map<String, dynamic>? data;
   final VoidCallback          onClose;
+  final bool                  showClose;
+  final VoidCallback?         onOverdueTap;
 
   const _UserProfilePanel({
     required this.loading,
     required this.data,
     required this.onClose,
+    this.showClose    = true,
+    this.onOverdueTap,
   });
 
   Color _gradeColor(double pct) {
@@ -3983,19 +4105,20 @@ class _UserProfilePanel extends StatelessWidget {
                 ],
               ),
             ),
-            InkWell(
-              onTap: onClose,
-              borderRadius: BorderRadius.circular(6),
-              child: Container(
-                width: 24, height: 24,
-                decoration: BoxDecoration(
-                  color:        _kBg,
-                  borderRadius: BorderRadius.circular(6),
-                  border:       Border.all(color: _kBorder),
+            if (showClose)
+              InkWell(
+                onTap: onClose,
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  width: 24, height: 24,
+                  decoration: BoxDecoration(
+                    color:        _kBg,
+                    borderRadius: BorderRadius.circular(6),
+                    border:       Border.all(color: _kBorder),
+                  ),
+                  child: const Icon(Icons.close, size: 12, color: _kMuted),
                 ),
-                child: const Icon(Icons.close, size: 12, color: _kMuted),
               ),
-            ),
           ]),
           const SizedBox(height: 14),
 
@@ -4008,6 +4131,33 @@ class _UserProfilePanel extends StatelessWidget {
             if ((workload['idea'] as int? ?? 0) > 0)
               _profileChip('${workload['idea']} Ideas', const Color(0xFF8B5CF6)),
           ]),
+
+          // ── Deadline warnings ───────────────────────────────────────────
+          Builder(builder: (_) {
+            final dl       = d['deadline_summary'] as Map<String, dynamic>?;
+            final overdue  = dl?['overdue']  as int? ?? 0;
+            final dueSoon  = dl?['due_soon'] as int? ?? 0;
+            if (overdue == 0 && dueSoon == 0) return const SizedBox(height: 16);
+            return Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Row(spacing: 8, children: [
+                if (overdue > 0)
+                  _deadlineBadge(
+                    icon:  Icons.warning_amber_rounded,
+                    label: '$overdue Overdue',
+                    color: const Color(0xFFEF4444),
+                    onTap: onOverdueTap,
+                  ),
+                if (dueSoon > 0)
+                  _deadlineBadge(
+                    icon:  Icons.schedule_rounded,
+                    label: '$dueSoon Due soon',
+                    color: const Color(0xFFF59E0B),
+                    onTap: null, // no backend filter yet
+                  ),
+              ]),
+            );
+          }),
           const SizedBox(height: 16),
 
           // ── Donut + completion rate ─────────────────────────────────────
@@ -4038,31 +4188,33 @@ class _UserProfilePanel extends StatelessWidget {
           ),
           const SizedBox(height: 16),
 
-          // ── Performance ─────────────────────────────────────────────────
+          // ── Performance charts ──────────────────────────────────────────
           const Text('PERFORMANCE',
               style: TextStyle(
                   fontSize: 10, fontWeight: FontWeight.w700,
                   color: _kMuted, letterSpacing: 0.5)),
-          const SizedBox(height: 8),
-          _profileRow('Avg actual',  '${(perf['avg_actual_days']  as num?)?.toStringAsFixed(1) ?? '–'}d'),
-          _profileRow('Avg planned', '${(perf['avg_planned_days'] as num?)?.toStringAsFixed(1) ?? '–'}d'),
-          _profileRow('Avg drift',   driftLbl, valueColor: driftClr),
-          _profileRow('On time',
-              '${perf['on_time'] ?? 0}  ·  L:${perf['late'] ?? 0}  ·  E:${perf['early'] ?? 0}'),
+          const SizedBox(height: 10),
+          _buildPerfBars(
+            avgActual:  (perf['avg_actual_days']  as num?)?.toDouble(),
+            avgPlanned: (perf['avg_planned_days'] as num?)?.toDouble(),
+            driftLbl:   driftLbl,
+            driftClr:   driftClr,
+          ),
+          const SizedBox(height: 14),
+          _buildTimingChart(
+            onTime: perf['on_time'] as int? ?? 0,
+            late:   perf['late']    as int? ?? 0,
+            early:  perf['early']   as int? ?? 0,
+          ),
           const SizedBox(height: 16),
 
-          // ── Health ──────────────────────────────────────────────────────
+          // ── Active task health ──────────────────────────────────────────
           const Text('ACTIVE TASK HEALTH',
               style: TextStyle(
                   fontSize: 10, fontWeight: FontWeight.w700,
                   color: _kMuted, letterSpacing: 0.5)),
-          const SizedBox(height: 8),
-          Wrap(spacing: 10, runSpacing: 6, children: [
-            _healthDot('Active',   health['active']   as int? ?? 0, const Color(0xFF10B981)),
-            _healthDot('At Risk',  health['at_risk']  as int? ?? 0, const Color(0xFFF59E0B)),
-            _healthDot('Stagnant', health['stagnant'] as int? ?? 0, const Color(0xFFF97316)),
-            _healthDot('Dead',     health['dead']     as int? ?? 0, const Color(0xFFEF4444)),
-          ]),
+          const SizedBox(height: 10),
+          _buildHealthBars(health),
           const SizedBox(height: 14),
 
           // ── Pause discipline ────────────────────────────────────────────
@@ -4144,6 +4296,37 @@ class _UserProfilePanel extends StatelessWidget {
     );
   }
 
+  Widget _deadlineBadge({
+    required IconData      icon,
+    required String        label,
+    required Color         color,
+    required VoidCallback? onTap,
+  }) {
+    final badge = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color:        color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+        border:       Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 13, color: color),
+        const SizedBox(width: 4),
+        Text(label,
+            style: TextStyle(
+                fontSize:   11,
+                fontWeight: FontWeight.w700,
+                color:      color)),
+        if (onTap != null) ...[
+          const SizedBox(width: 4),
+          Icon(Icons.arrow_forward_rounded, size: 11, color: color),
+        ],
+      ]),
+    );
+    if (onTap == null) return badge;
+    return GestureDetector(onTap: onTap, child: badge);
+  }
+
   Widget _profileChip(String text, Color color) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -4157,37 +4340,202 @@ class _UserProfilePanel extends StatelessWidget {
     );
   }
 
-  Widget _profileRow(String label, String value, {Color? valueColor}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(children: [
-        SizedBox(
-          width: 86,
-          child: Text(label,
-              style: const TextStyle(fontSize: 11, color: _kMuted)),
-        ),
-        Expanded(
-          child: Text(value,
-              style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: valueColor ?? _kPrimary)),
-        ),
-      ]),
+  // ── Performance: Planned vs Actual bars + drift ─────────────────────────
+
+  Widget _buildPerfBars({
+    required double? avgActual,
+    required double? avgPlanned,
+    required String  driftLbl,
+    required Color   driftClr,
+  }) {
+    final maxVal = [avgActual ?? 0.0, avgPlanned ?? 0.0, 0.1]
+        .reduce((a, b) => a > b ? a : b);
+    final overBudget = avgActual != null && avgPlanned != null && avgActual > avgPlanned;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _horizBar('Planned', avgPlanned, maxVal, const Color(0xFF6366F1)),
+        const SizedBox(height: 8),
+        _horizBar('Actual',  avgActual,  maxVal,
+            overBudget ? const Color(0xFFEF4444) : const Color(0xFF10B981)),
+        const SizedBox(height: 8),
+        Row(children: [
+          const Text('Avg drift ',
+              style: TextStyle(fontSize: 11, color: _kMuted)),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color:        driftClr.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(driftLbl,
+                style: TextStyle(
+                    fontSize: 11, fontWeight: FontWeight.w700, color: driftClr)),
+          ),
+        ]),
+      ],
     );
   }
 
-  Widget _healthDot(String label, int count, Color color) {
-    return Row(mainAxisSize: MainAxisSize.min, children: [
-      Container(width: 7, height: 7,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-      const SizedBox(width: 4),
-      Text('$label: $count',
+  Widget _horizBar(String label, double? value, double maxVal, Color color) {
+    final pct = (value == null || maxVal == 0)
+        ? 0.0
+        : (value / maxVal).clamp(0.0, 1.0);
+    return Row(children: [
+      SizedBox(
+        width: 50,
+        child: Text(label, style: const TextStyle(fontSize: 10, color: _kMuted)),
+      ),
+      Expanded(
+        child: LayoutBuilder(builder: (_, c) => Stack(children: [
+          Container(
+            height: 8,
+            decoration: BoxDecoration(
+                color: _kBorder, borderRadius: BorderRadius.circular(4)),
+          ),
+          Container(
+            height: 8,
+            width: c.maxWidth * pct,
+            decoration: BoxDecoration(
+                color: color, borderRadius: BorderRadius.circular(4)),
+          ),
+        ])),
+      ),
+      const SizedBox(width: 8),
+      SizedBox(
+        width: 36,
+        child: Text(
+          value != null ? '${value.toStringAsFixed(1)}d' : '–',
           style: TextStyle(
-              fontSize: 11,
-              color: count > 0 ? color : _kMuted,
-              fontWeight: count > 0 ? FontWeight.w600 : FontWeight.normal)),
+              fontSize: 10, fontWeight: FontWeight.w600, color: color),
+          textAlign: TextAlign.right,
+        ),
+      ),
     ]);
+  }
+
+  // ── Timing donut: On Time / Late / Early ─────────────────────────────────
+
+  Widget _buildTimingChart({
+    required int onTime,
+    required int late,
+    required int early,
+  }) {
+    final total = onTime + late + early;
+    if (total == 0) return const SizedBox.shrink();
+    final td = total.toDouble();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('COMPLETION TIMING',
+            style: TextStyle(
+                fontSize: 10, fontWeight: FontWeight.w700,
+                color: _kMuted, letterSpacing: 0.5)),
+        const SizedBox(height: 10),
+        Row(children: [
+          SizedBox(
+            width: 90, height: 90,
+            child: PieChart(PieChartData(
+              sectionsSpace:      2,
+              centerSpaceRadius:  26,
+              sections: [
+                if (onTime > 0) PieChartSectionData(
+                    value: onTime.toDouble(),
+                    color: const Color(0xFF10B981),
+                    title: '', radius: 20),
+                if (late > 0)   PieChartSectionData(
+                    value: late.toDouble(),
+                    color: const Color(0xFFEF4444),
+                    title: '', radius: 20),
+                if (early > 0)  PieChartSectionData(
+                    value: early.toDouble(),
+                    color: const Color(0xFF3B82F6),
+                    title: '', radius: 20),
+              ],
+            )),
+          ),
+          const SizedBox(width: 14),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _timingRow('On time', onTime, td, const Color(0xFF10B981)),
+              const SizedBox(height: 6),
+              _timingRow('Late',    late,   td, const Color(0xFFEF4444)),
+              const SizedBox(height: 6),
+              _timingRow('Early',   early,  td, const Color(0xFF3B82F6)),
+            ],
+          ),
+        ]),
+      ],
+    );
+  }
+
+  Widget _timingRow(String label, int count, double total, Color color) {
+    final pct = '${(count / total * 100).toStringAsFixed(0)}%';
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Container(width: 8, height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+      const SizedBox(width: 5),
+      Text('$label ', style: const TextStyle(fontSize: 11, color: _kMuted)),
+      Text('$count',
+          style: TextStyle(
+              fontSize: 11, fontWeight: FontWeight.w700, color: color)),
+      Text(' ($pct)',
+          style: const TextStyle(fontSize: 10, color: _kMuted)),
+    ]);
+  }
+
+  // ── Health: mini horizontal bars ─────────────────────────────────────────
+
+  Widget _buildHealthBars(Map<String, dynamic> health) {
+    final items = [
+      ('Active',   health['active']   as int? ?? 0, const Color(0xFF10B981)),
+      ('At Risk',  health['at_risk']  as int? ?? 0, const Color(0xFFF59E0B)),
+      ('Stagnant', health['stagnant'] as int? ?? 0, const Color(0xFFF97316)),
+      ('Dead',     health['dead']     as int? ?? 0, const Color(0xFFEF4444)),
+    ];
+    final maxCount = items.map((e) => e.$2).reduce((a, b) => a > b ? a : b);
+    return Column(
+      children: items.map((item) {
+        final (label, count, color) = item;
+        final pct = maxCount == 0 ? 0.0 : (count / maxCount).clamp(0.0, 1.0);
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 7),
+          child: Row(children: [
+            SizedBox(
+              width: 58,
+              child: Text(label,
+                  style: const TextStyle(fontSize: 10, color: _kMuted)),
+            ),
+            Expanded(
+              child: LayoutBuilder(builder: (_, c) => Stack(children: [
+                Container(
+                  height: 7,
+                  decoration: BoxDecoration(
+                      color: _kBorder, borderRadius: BorderRadius.circular(4)),
+                ),
+                Container(
+                  height: 7,
+                  width: c.maxWidth * pct,
+                  decoration: BoxDecoration(
+                      color: count > 0 ? color : Colors.transparent,
+                      borderRadius: BorderRadius.circular(4)),
+                ),
+              ])),
+            ),
+            const SizedBox(width: 6),
+            SizedBox(
+              width: 16,
+              child: Text('$count',
+                  style: TextStyle(
+                      fontSize: 10, fontWeight: FontWeight.w600,
+                      color: count > 0 ? color : _kMuted),
+                  textAlign: TextAlign.right),
+            ),
+          ]),
+        );
+      }).toList(),
+    );
   }
 }
 

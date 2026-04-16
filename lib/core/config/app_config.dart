@@ -5,7 +5,7 @@ class AppConfig {
   // pass --dart-define=API_BASE_URL=https://operations.conveylabs.ai
   static const baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://operations.conveylabs.ai',
+      defaultValue: 'https://operations.conveylabs.ai',
   );
 
   // Page names — must match what backend stores in ops_page_access

@@ -18,24 +18,19 @@ class ApiClient {
           headers: {
             'Content-Type': 'application/json',
           },
+          // Dio web adapter reads this on every request to set
+          // XMLHttpRequest.withCredentials = true
+          extra: {'withCredentials': true},
         )) {
-    // Enable cross-origin cookies. The backend issues an HttpOnly Set-Cookie
-    // on /auth/login; without withCredentials the browser would never send
-    // it back on subsequent requests, and we'd never be authenticated.
-    final adapter = BrowserHttpClientAdapter();
-    adapter.withCredentials = true;
-    dio.httpClientAdapter = adapter;
+    // Also set it on the adapter instance for older Dio versions
+    // that read it from the adapter instead of options.extra
+    dio.httpClientAdapter = BrowserHttpClientAdapter(withCredentials: true);
 
     dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
-        // Cache-busting query param for GET requests only — keeps POST/PUT
-        // bodies clean and avoids CORS preflight on header-based cache hints.
-        if (options.method == 'GET') {
-          options.queryParameters = {
-            ...options.queryParameters,
-            '_t': DateTime.now().millisecondsSinceEpoch.toString(),
-          };
-        }
+        // Force withCredentials on every request so the browser always
+        // sends the HttpOnly auth cookie cross-origin.
+        options.extra['withCredentials'] = true;
         debugPrint('[API] ${options.method} ${options.uri}');
         handler.next(options);
       },
@@ -44,10 +39,9 @@ class ApiClient {
             '${error.requestOptions.uri} → '
             '${error.response?.statusCode} ${error.response?.data}');
         // Don't trigger global logout for auth endpoints — a failed login
-        // shouldn't recursively dispatch a logout event.
+        // or session check shouldn't recursively dispatch a logout event.
         final path = error.requestOptions.path;
-        final isAuthEndpoint = path.contains('/auth/login') ||
-            path.contains('/auth/logout');
+        final isAuthEndpoint = path.contains('/auth/');
         if (error.response?.statusCode == 401 && !isAuthEndpoint) {
           onUnauthorized?.call();
         }
@@ -93,6 +87,11 @@ class ApiClient {
   /// Returns only id, name, color, role for active users. Any authenticated user can call.
   Future<Response> getUserDirectory() {
     return dio.get('/users/directory');
+  }
+
+  /// Returns { online: [userId, ...] } — currently connected user IDs.
+  Future<Response> getOnlineUsers() {
+    return dio.get('/users/online');
   }
 
   Future<Response> getUser(String id) {
@@ -266,6 +265,10 @@ class ApiClient {
     return dio.delete('/attendance/$id');
   }
 
+  Future<Response> deleteAttendanceByDate(String date) {
+    return dio.delete('/attendance/by-date', queryParameters: {'date': date});
+  }
+
   Future<Response> getAttendanceSummary({String? startDate, String? endDate}) {
     final params = <String, dynamic>{};
     if (startDate != null) params['start_date'] = startDate;
@@ -344,6 +347,19 @@ class ApiClient {
     });
   }
 
+  Future<Response> deleteConversation(String conversationId) {
+    return dio.delete('/chat/conversations/$conversationId');
+  }
+
+  Future<Response> addGroupMembers(String conversationId, List<String> memberIds) {
+    return dio.post('/chat/conversations/$conversationId/members',
+        data: {'member_ids': memberIds});
+  }
+
+  Future<Response> removeGroupMember(String conversationId, String userId) {
+    return dio.delete('/chat/conversations/$conversationId/members/$userId');
+  }
+
   Future<Response> reviewTaskFromChat(String messageId, String status) {
     return dio.put('/chat/messages/$messageId/review', data: {'status': status});
   }
@@ -359,6 +375,25 @@ class ApiClient {
 
   Future<Response> getUserSummary(String userId) {
     return dio.get('/analytics/users/$userId/summary');
+  }
+
+  /// Summary for the currently logged-in user (workers/interns use this).
+  Future<Response> getMyUserSummary() {
+    return dio.get('/analytics/users/me/summary');
+  }
+
+  // ── Web Push ───────────────────────────────────────────────────────────────
+
+  Future<Response> getVapidPublicKey() {
+    return dio.get('/users/push/vapid-public-key');
+  }
+
+  Future<Response> subscribePush(Map<String, dynamic> subscription) {
+    return dio.post('/users/push/subscribe', data: subscription);
+  }
+
+  Future<Response> unsubscribePush(String endpoint) {
+    return dio.delete('/users/push/subscribe', data: {'endpoint': endpoint});
   }
 
   Future<Response> getTaskPerformance({String? userId, String? startDate, String? endDate}) {

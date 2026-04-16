@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../core/api/api_client.dart';
+import '../../core/auth/auth_bloc.dart';
+import '../../core/config/app_config.dart';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const _kAccent  = Color(0xFFE94560);
@@ -145,6 +147,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   List<_EmployeeSummary>? _cachedSummaries;
   // Server-computed summaries (preferred when fresh)
   List<_EmployeeSummary>? _apiSummaries;
+
+  // Backend-parsed login_time/logout_time keyed by "date|EMPLOYEE".
+  // Populated from GET /attendance response — drives AM/PM cell coloring.
+  // Values are 24-hour strings with PM inference already applied ("19:30").
+  final Map<String, String> _loginTimes  = {};
+  final Map<String, String> _logoutTimes = {};
+
+  // Backend record IDs keyed by "date|EMPLOYEE" — needed for DELETE.
+  final Map<String, int> _recordIds = {};
   Timer? _analysisDebounce;
   Timer? _saveDebounce;
 
@@ -304,6 +315,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       final attData = (attRes.data as List).cast<Map<String, dynamic>>();
 
       // 3. Transform API data → row format: {date: 'DD-MM-YYYY', EMPLOYEE: 'raw_value', ...}
+      _loginTimes.clear();
+      _logoutTimes.clear();
+      _recordIds.clear();
+
       final rowMap = <String, Map<String, String>>{}; // date string → row
       for (final entry in attData) {
         // API returns full ISO ('2026-04-05T18:30:00.000Z') — parse it
@@ -321,6 +336,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           return row;
         });
         rowMap[displayDate]![userName] = rawValue;
+
+        // Cache record ID + backend-parsed login/logout times.
+        final recordId = entry['id'];
+        final loginT   = entry['login_time']  as String?;
+        final logoutT  = entry['logout_time'] as String?;
+        final key      = '$displayDate|$userName';
+        if (recordId is int) _recordIds[key] = recordId;
+        if (loginT  != null) _loginTimes[key]  = loginT;
+        if (logoutT != null) _logoutTimes[key] = logoutT;
       }
 
       // Sort rows by date
@@ -396,6 +420,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         final userId = _employeeIds[emp];
         if (userId == null) continue;
         final rawValue = row[emp] ?? '';
+        if (rawValue.isEmpty) continue; // skip cleared cells — already deleted via API
         bulkRows.add({
           'user_id': userId,
           'date': apiDate,
@@ -487,14 +512,33 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     }
   }
 
-  void _deleteRow(int i) {
+  /// Delete all attendance records for a row's date via the by-date endpoint,
+  /// then remove the row from local state.
+  Future<void> _deleteRowByDate(int i) async {
+    final dateStr = _rows[i]['date'] ?? '';
+    if (dateStr.isEmpty) return;
+    final parts = dateStr.split('-');
+    if (parts.length != 3) return;
+    final apiDate = '${parts[2]}-${parts[1]}-${parts[0]}'; // YYYY-MM-DD
+
+    // Remove from local state immediately
     setState(() {
+      // Clean up cached IDs and times for this row
+      for (final emp in _employees) {
+        final key = '$dateStr|$emp';
+        _recordIds.remove(key);
+        _loginTimes.remove(key);
+        _logoutTimes.remove(key);
+      }
       _rows.removeAt(i);
       _rebuildCells();
       _cachedSummaries = null;
-      _setStateCount++;
-      debugPrint('[Perf] setState #$_setStateCount (_deleteRow)');
     });
+
+    // Fire backend delete
+    try {
+      await _api.deleteAttendanceByDate(apiDate);
+    } catch (_) {}
   }
 
   @override
@@ -541,15 +585,32 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     return true;
   }
 
-  /// Format hour in 12-hour style (e.g. 13 → 01, 9 → 09).
-  String _fmt12(int hour24) {
+  /// Extract the 24-hour hour component from a "HH:MM" string from the backend.
+  /// Returns null if the input is null/empty/invalid.
+  int? _hourOf(String? hhmm) {
+    if (hhmm == null || hhmm.isEmpty) return null;
+    final parts = hhmm.split(':');
+    if (parts.isEmpty) return null;
+    return int.tryParse(parts[0]);
+  }
+
+  /// Format hour in 12-hour style, zero-padded (e.g. 13 → 01, 9 → 09).
+  String _fmt12Padded(int hour24) {
     final h = hour24 % 12;
     return (h == 0 ? 12 : h).toString().padLeft(2, '0');
   }
 
-  /// Double-tap logic:
+  /// Format hour in 12-hour style, NOT padded (e.g. 13 → 1, 9 → 9).
+  /// Used for logout half per backend convention: `09:00-7:30`.
+  String _fmt12Unpadded(int hour24) {
+    final h = hour24 % 12;
+    return (h == 0 ? 12 : h).toString();
+  }
+
+  /// Double-tap logic (format is LOGIN-LOGOUT, both plain 12h clock times,
+  /// no AM/PM markers — backend does all inference and math).
   /// - Empty cell → pick login time, store as "HH:MM-"
-  /// - Cell has "HH:MM-" (login only) → pick logout, calculate hours worked
+  /// - Cell has "HH:MM-" (login only) → pick logout, store as "HH:MM-H:MM"
   Future<void> _pickTime(int rowIndex, String emp) async {
     final row = _rows[rowIndex];
     final ctrl = _controllers['${rowIndex}_$emp']!;
@@ -571,7 +632,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       );
       if (loginTime == null || !mounted) return;
 
-      final value = '${_fmt12(loginTime.hour)}:'
+      final value = '${_fmt12Padded(loginTime.hour)}:'
           '${loginTime.minute.toString().padLeft(2, '0')}-';
 
       setState(() {
@@ -580,10 +641,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         _cachedSummaries = null;
       });
     } else {
-      // ── Evening: pick logout time, calculate hours worked ──
+      // ── Evening: pick logout time, store as-is. No math. Backend handles
+      //   duration/AM-PM inference via parseHours / parseLogoutTime.
       final logoutTime = await showTimePicker(
         context: context,
-        initialTime: const TimeOfDay(hour: 6, minute: 0),
+        initialTime: const TimeOfDay(hour: 18, minute: 0),
         helpText: 'Select logout time',
         builder: (ctx, child) => MediaQuery(
           data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: false),
@@ -592,23 +654,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       );
       if (logoutTime == null || !mounted) return;
 
-      // Parse the stored login time
-      final loginParts = current.replaceAll('-', '').split(':');
-      final loginMins = (int.tryParse(loginParts[0]) ?? 0) * 60.0 +
-          (int.tryParse(loginParts[1]) ?? 0);
-      // Logout in 12h: if picked hour <= login hour, it's PM offset
-      final logoutH = logoutTime.hour % 12;
-      final logoutMins = logoutH * 60.0 + logoutTime.minute;
-
-      double diff = logoutMins - loginMins;
-      if (diff < 0) diff += 12 * 60;
-      final workedH = (diff / 60).floor();
-      final workedM = (diff % 60).round();
-
-      final workedStr = workedM > 0
-          ? '$workedH:${workedM.toString().padLeft(2, '0')}'
-          : '$workedH';
-      final value = '$current$workedStr';
+      final logoutStr = '${_fmt12Unpadded(logoutTime.hour)}:'
+          '${logoutTime.minute.toString().padLeft(2, '0')}';
+      final value = '$current$logoutStr';
 
       setState(() {
         row[emp] = value;
@@ -825,12 +873,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     );
   }
 
+  bool get _canEdit {
+    final state = context.read<AuthBloc>().state;
+    if (state is! AuthAuthenticated) return false;
+    return state.user.hasEditAccess(AppConfig.pageAttendance);
+  }
+
   Widget _buildTable() {
     const dateWidth = 110.0;
     const delWidth  = 28.0;
     const colWidth  = 160.0;
     const headerH   = 40.0;
     const rowH      = 36.0;
+    final canEdit   = _canEdit;
     final totalEmpW = _employees.length * colWidth;
 
     return Column(
@@ -841,11 +896,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           color: _kPrimary,
           child: Row(
             children: [
-              // Fixed: del spacer + DATE label
+              // Fixed: DATE label (+ delete column spacer for edit users)
               SizedBox(
-                width: delWidth + dateWidth,
+                width: canEdit ? delWidth + dateWidth : dateWidth,
                 child: Padding(
-                  padding: EdgeInsets.only(left: delWidth + 10),
+                  padding: EdgeInsets.only(left: canEdit ? delWidth + 10 : 10),
                   child: const Align(
                     alignment: Alignment.centerLeft,
                     child: Text('DATE',
@@ -928,9 +983,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // LEFT: fixed date + delete column
+                // LEFT: fixed date column (+ delete button for edit users)
                 SizedBox(
-                  width: delWidth + dateWidth,
+                  width: canEdit ? delWidth + dateWidth : dateWidth,
                   child: ListView.builder(
                     controller: _vScroll,
                     physics: const NeverScrollableScrollPhysics(),
@@ -954,21 +1009,22 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                             bottom: BorderSide(color: _kBorder)),
                       ),
                       child: Row(children: [
-                        // Delete button
-                        SizedBox(
-                          width: delWidth,
-                          child: Center(
-                            child: InkWell(
-                              onTap: () => _deleteRow(i),
-                              borderRadius: BorderRadius.circular(3),
-                              child: Padding(
-                                padding: const EdgeInsets.all(3),
-                                child: Icon(Icons.close,
-                                    size: 12, color: Colors.grey[400]),
+                        // Delete row button (edit users only)
+                        if (canEdit)
+                          SizedBox(
+                            width: delWidth,
+                            child: Center(
+                              child: InkWell(
+                                onTap: () => _deleteRowByDate(i),
+                                borderRadius: BorderRadius.circular(3),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(3),
+                                  child: Icon(Icons.close,
+                                      size: 12, color: Colors.grey[400]),
+                                ),
                               ),
                             ),
                           ),
-                        ),
                         // Date cell
                         SizedBox(
                           width: dateWidth,
@@ -1032,27 +1088,44 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                                 } else if (!_isHoliday(raw) && parsed == null) {
                                   bg = const Color(0xFFFFEBEE);
                                 }
+                                // Backend-parsed times for AM/PM colouring.
+                                final tKey      = '${row['date']}|$emp';
+                                final loginHr   = _hourOf(_loginTimes[tKey]);
+                                final logoutHr  = _hourOf(_logoutTimes[tKey]);
+                                final canEdit = _canEdit;
                                 return _TimeCellWithHoverClear(
                                   width: colWidth,
                                   bg: bg,
                                   hasValue: raw.isNotEmpty,
-                                  onDoubleTap: () => _pickTime(i, emp),
-                                  onClear: () {
+                                  loginHour:  loginHr,
+                                  logoutHour: logoutHr,
+                                  onDoubleTap: canEdit ? () => _pickTime(i, emp) : null,
+                                  onClear: canEdit ? () {
+                                    final tKey = '${row['date']}|$emp';
+                                    final id = _recordIds[tKey];
                                     setState(() {
                                       row[emp] = '';
                                       _controllers['${i}_$emp']!.text = '';
                                       _cachedSummaries = null;
+                                      _recordIds.remove(tKey);
+                                      _loginTimes.remove(tKey);
+                                      _logoutTimes.remove(tKey);
                                     });
+                                    // Delete from backend if record exists
+                                    if (id != null) {
+                                      _api.deleteAttendance(id.toString());
+                                    }
                                     _scheduleAnalysisUpdate();
-                                  },
+                                  } : null,
                                   child: TextField(
                                     controller: _controllers['${i}_$emp']!,
                                     focusNode:  _focusNodes['${i}_$emp'],
-                                    onChanged: (v) {
+                                    readOnly: !canEdit,
+                                    onChanged: canEdit ? (v) {
                                       if (_checkAsdf(v, _controllers['${i}_$emp']!, row, emp)) return;
                                       row[emp] = v;
                                       _scheduleAnalysisUpdate();
-                                    },
+                                    } : null,
                                     style: TextStyle(
                                       fontSize: 12,
                                       color: isLeave
@@ -1087,7 +1160,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           ),
           child: Row(
             children: [
-              const SizedBox(width: delWidth + dateWidth),
+              SizedBox(width: canEdit ? delWidth + dateWidth : dateWidth),
               Expanded(
                 child: Scrollbar(
                   controller: _hScrollBar,
@@ -1113,17 +1186,22 @@ class _TimeCellWithHoverClear extends StatefulWidget {
   final double width;
   final Color? bg;
   final bool hasValue;
-  final VoidCallback onDoubleTap;
-  final VoidCallback onClear;
+  final VoidCallback? onDoubleTap;
+  final VoidCallback? onClear;
   final Widget child;
+  // Backend-parsed 24h hours (with PM inference applied). Null = unknown.
+  final int? loginHour;
+  final int? logoutHour;
 
   const _TimeCellWithHoverClear({
     required this.width,
     required this.bg,
     required this.hasValue,
-    required this.onDoubleTap,
-    required this.onClear,
+    this.onDoubleTap,
+    this.onClear,
     required this.child,
+    this.loginHour,
+    this.logoutHour,
   });
 
   @override
@@ -1134,8 +1212,20 @@ class _TimeCellWithHoverClear extends StatefulWidget {
 class _TimeCellWithHoverClearState extends State<_TimeCellWithHoverClear> {
   bool _hovered = false;
 
+  // Soft palette — readable over white, yellow-leave, and pink-invalid backgrounds.
+  static const _amColor = Color(0xFF60A5FA); // sky-400 (AM)
+  static const _pmColor = Color(0xFFFB923C); // orange-400 (PM)
+
+  Color? _halfColor(int? hour24) {
+    if (hour24 == null) return null;
+    return hour24 < 12 ? _amColor : _pmColor;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final loginClr  = _halfColor(widget.loginHour);
+    final logoutClr = _halfColor(widget.logoutHour);
+
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit:  (_) => setState(() => _hovered = false),
@@ -1149,7 +1239,26 @@ class _TimeCellWithHoverClearState extends State<_TimeCellWithHoverClear> {
             alignment: Alignment.centerRight,
             children: [
               widget.child,
-              if (_hovered && widget.hasValue)
+              // AM/PM indicator — thin bar pinned to the bottom of the cell
+              if (loginClr != null || logoutClr != null)
+                Positioned(
+                  left: 0, right: 0, bottom: 0,
+                  child: Row(children: [
+                    Expanded(
+                      child: Container(
+                        height: 3,
+                        color: loginClr ?? Colors.transparent,
+                      ),
+                    ),
+                    Expanded(
+                      child: Container(
+                        height: 3,
+                        color: logoutClr ?? Colors.transparent,
+                      ),
+                    ),
+                  ]),
+                ),
+              if (_hovered && widget.hasValue && widget.onClear != null)
                 GestureDetector(
                   onTap: widget.onClear,
                   child: Container(

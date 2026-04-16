@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:ui' show ImageFilter;
 import 'dart:math' show min;
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../core/api/api_client.dart';
 import '../../core/auth/auth_bloc.dart';
+import '../../core/auth/user_role.dart';
+import '../../core/socket/socket_service.dart';
 
 // ── Design tokens (match the rest of the app) ──────────────────────────────────
 const _kAccent  = Color(0xFFE94560);
@@ -43,6 +46,7 @@ class _Message {
   final String?        text;
   final bool           sent;
   final String         time;
+  final String?        senderName;  // shown in group chats
   final String?        imageCaption;
   final _ChatTask?     task;       // task_review card
   final _PauseRequest? pauseReq;  // pause_request card
@@ -53,6 +57,7 @@ class _Message {
     this.text,
     this.sent        = false,
     this.time        = '',
+    this.senderName,
     this.imageCaption,
     this.task,
     this.pauseReq,
@@ -117,7 +122,7 @@ class _IdeaRequest {
 
 // ── Task review models ────────────────────────────────────────────────────────
 
-enum _TaskReviewStatus { pending, completed, rejected }
+enum _TaskReviewStatus { pending, completed, rejected, none }
 
 class _ChatTask {
   final String  messageId;  // ops_messages.id — needed to call reviewTask API
@@ -133,6 +138,7 @@ class _ChatTask {
   final String? endDate;    // display string, nullable
   bool          isPaused;
   final int     commentCount;
+  final bool    isNotification; // task_created — info card, no actions
   _TaskReviewStatus              reviewStatus;
   Map<String, dynamic>?          pendingPauseRequest; // non-null = pause needs approval
 
@@ -150,6 +156,7 @@ class _ChatTask {
     this.endDate              = null,
     this.isPaused             = false,
     this.commentCount         = 0,
+    this.isNotification       = false,
     this.reviewStatus         = _TaskReviewStatus.pending,
     this.pendingPauseRequest,
   });
@@ -311,26 +318,213 @@ class _ChatScreenState extends State<ChatScreen> {
   List<_Message> _messages = [];
   String? _myUserId;
 
-  ApiClient get _api => context.read<ApiClient>();
+  // Socket subscriptions
+  StreamSubscription<Map<String, dynamic>>? _newMsgSub;
+  StreamSubscription<Map<String, dynamic>>? _reviewUpdatedSub;
+  StreamSubscription<Set<String>>?          _onlineUsersSub;
+
+  ApiClient       get _api    => context.read<ApiClient>();
+  SocketService   get _socket => context.read<SocketService>();
 
   @override
   void initState() {
     super.initState();
     _msgCtrl.addListener(() => setState(() {}));
     _searchCtrl.addListener(() => setState(() => _search = _searchCtrl.text));
-    _loadConversations();
+
     final authState = context.read<AuthBloc>().state;
     if (authState is AuthAuthenticated) {
       _myUserId = authState.user.id;
     }
+
+    _loadConversations();
+    _subscribeSocket();
+    _socket.clearUnreadCount();
+  }
+
+  void _subscribeSocket() {
+    _newMsgSub        = _socket.onNewMessage.listen(_onSocketNewMessage);
+    _reviewUpdatedSub = _socket.onReviewUpdated.listen(_onSocketReviewUpdated);
+    // Rebuild contact list when presence changes so dots update live.
+    _onlineUsersSub   = _socket.onOnlineUsers.listen((_) { if (mounted) setState(() {}); });
+  }
+
+  void _onSocketNewMessage(Map<String, dynamic> data) {
+    final convId = data['conversation_id'] as String?;
+    // Always refresh sidebar preview
+    _loadConversations();
+    // If the message belongs to the open conversation, append it
+    if (convId == _selectedId) {
+      final parsed = _parseMessage(data);
+      if (parsed != null && mounted) {
+        setState(() => _messages.add(parsed));
+        _scrollToBottom();
+      }
+    }
+  }
+
+  void _onSocketReviewUpdated(Map<String, dynamic> data) {
+    final msgId = data['message_id'] as String?;
+    final status = data['review_status'] as String?;
+    if (msgId == null || status == null || !mounted) return;
+    setState(() {
+      for (final msg in _messages) {
+        if (msg.task?.messageId == msgId) {
+          msg.task!.reviewStatus = _parseReviewStatus(status);
+          break;
+        }
+      }
+    });
+  }
+
+  /// Parses a raw message map (same shape as getMessages API) into a _Message.
+  _Message? _parseMessage(Map<String, dynamic> m) {
+    final type      = m['type'] as String? ?? 'text';
+    final senderId  = m['sender_id'] as String?;
+    final isSent    = senderId == _myUserId;
+    final time      = _formatTime(m['created_at'] as String? ?? '');
+    final senderName = m['sender_name'] as String?;
+
+    if (type == 'task_created' || type == 'task_review') {
+      final isNotif = type == 'task_created';
+      final task = m['task'] as Map<String, dynamic>?;
+      String assigneeName = '';
+      final assignees = task?['assignees'] as List?;
+      if (assignees != null && assignees.isNotEmpty) {
+        assigneeName = assignees.map((a) => (a as Map)['name']?.toString() ?? '').join(', ');
+      }
+      String reviewerName = '';
+      String reviewerId   = '';
+      final reviewers = task?['reviewers'] as List?;
+      if (reviewers != null && reviewers.isNotEmpty) {
+        reviewerName = reviewers.map((r) => (r as Map)['name']?.toString() ?? '').join(', ');
+        reviewerId   = (reviewers.first as Map)['id']?.toString() ?? '';
+      }
+      final priorityRaw   = (task?['priority'] as String? ?? 'medium').toLowerCase();
+      final priorityLabel = priorityRaw.isNotEmpty
+          ? priorityRaw[0].toUpperCase() + priorityRaw.substring(1)
+          : 'Medium';
+      String? endDateStr;
+      final rawEnd = task?['end_date'] as String?;
+      if (rawEnd != null && rawEnd.isNotEmpty) {
+        final dt = DateTime.tryParse(rawEnd);
+        if (dt != null) endDateStr = _fmtDate(dt);
+      }
+      String dateStr = '';
+      final rawDate = task?['date'] as String?;
+      if (rawDate != null && rawDate.isNotEmpty) {
+        final dt = DateTime.tryParse(rawDate);
+        if (dt != null) dateStr = _fmtDate(dt);
+      }
+      return _Message(
+        sent: isSent, time: time, senderName: senderName,
+        task: task != null ? _ChatTask(
+          messageId:           m['id'] as String? ?? '',
+          taskId:              task['id'] as String? ?? '',
+          title:               task['title'] as String? ?? '',
+          description:         task['description'] as String? ?? '',
+          assignee:            assigneeName,
+          reviewerName:        reviewerName,
+          reviewerId:          reviewerId,
+          priority:            priorityLabel,
+          type:                '',
+          date:                dateStr,
+          endDate:             endDateStr,
+          isPaused:            task['is_paused'] as bool? ?? false,
+          isNotification:      isNotif,
+          reviewStatus:        isNotif
+              ? _TaskReviewStatus.none
+              : _parseReviewStatus(m['review_status'] as String?),
+          pendingPauseRequest: task['pending_pause_request'] as Map<String, dynamic>?,
+        ) : null,
+      );
+    }
+
+    return _Message(text: m['content'] as String?, sent: isSent, time: time, senderName: senderName);
+  }
+
+  void _selectConversation(String convId) {
+    if (_selectedId == convId) return;
+    if (_selectedId.isNotEmpty) _socket.leaveConversation(_selectedId);
+    setState(() => _selectedId = convId);
+    _socket.joinConversation(convId);
+    _loadMessages(convId);
   }
 
   @override
   void dispose() {
+    _newMsgSub?.cancel();
+    _reviewUpdatedSub?.cancel();
+    _onlineUsersSub?.cancel();
+    if (_selectedId.isNotEmpty) _socket.leaveConversation(_selectedId);
     _msgCtrl.dispose();
     _searchCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _showNewChatDialog() async {
+    // Load all users from directory
+    List<Map<String, dynamic>> users = [];
+    try {
+      final res = await _api.getUserDirectory();
+      users = (res.data as List).cast<Map<String, dynamic>>();
+      // Remove self from the list
+      users.removeWhere((u) => u['id'] == _myUserId);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to load users')),
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => _NewChatDialog(
+        users: users,
+        onUserSelected: (userId) async {
+          Navigator.of(ctx).pop();
+          // Create or open existing DM
+          try {
+            final res = await _api.createConversation({
+              'type': 'direct',
+              'member_ids': [userId],
+            });
+            final convId = (res.data as Map<String, dynamic>)['id'] as String;
+            await _loadConversations();
+            if (mounted) _selectConversation(convId);
+          } catch (_) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Failed to start conversation')),
+              );
+            }
+          }
+        },
+        onGroupCreated: (name, memberIds) async {
+          Navigator.of(ctx).pop();
+          try {
+            final res = await _api.createConversation({
+              'type': 'group',
+              'name': name,
+              'member_ids': memberIds,
+            });
+            final convId = (res.data as Map<String, dynamic>)['id'] as String;
+            await _loadConversations();
+            if (mounted) _selectConversation(convId);
+          } catch (_) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Failed to create group')),
+              );
+            }
+          }
+        },
+      ),
+    );
   }
 
   Future<void> _loadConversations() async {
@@ -339,8 +533,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final res = await _api.getConversations(search: _search.isEmpty ? null : _search);
       _conversations = (res.data as List).cast<Map<String, dynamic>>();
       if (_conversations.isNotEmpty && _selectedId.isEmpty) {
-        _selectedId = _conversations.first['id'] as String;
-        _loadMessages(_selectedId);
+        _selectConversation(_conversations.first['id'] as String);
       }
     } catch (_) {
       _conversations = [];
@@ -360,14 +553,16 @@ class _ChatScreenState extends State<ChatScreen> {
         final senderId = m['sender_id'] as String?;
         final isSent = senderId == _myUserId;
         final time = _formatTime(m['created_at'] as String? ?? '');
+        final senderName = m['sender_name'] as String?;
 
         if (type == 'idea_request') {
           final ir = m['idea_request'] as Map<String, dynamic>?;
           if (ir != null) {
             return _Message(
-              sent:    isSent,
-              time:    time,
-              ideaReq: _IdeaRequest.fromJson(ir),
+              sent:       isSent,
+              time:       time,
+              senderName: senderName,
+              ideaReq:    _IdeaRequest.fromJson(ir),
             );
           }
         }
@@ -376,20 +571,24 @@ class _ChatScreenState extends State<ChatScreen> {
           final pr = m['pause_request'] as Map<String, dynamic>?;
           if (pr != null) {
             return _Message(
-              sent:     isSent,
-              time:     time,
-              pauseReq: _PauseRequest.fromJson(pr),
+              sent:       isSent,
+              time:       time,
+              senderName: senderName,
+              pauseReq:   _PauseRequest.fromJson(pr),
             );
           }
         }
 
-        if (type == 'task_review') {
+        if (type == 'task_created' || type == 'task_review') {
+          final isNotif = type == 'task_created';
           final task = m['task'] as Map<String, dynamic>?;
-          // Extract person name from assignees array (backend uses junction table)
+          // Extract all assignee names
           String assigneeName = '';
           final assignees = task?['assignees'] as List?;
           if (assignees != null && assignees.isNotEmpty) {
-            assigneeName = (assignees.first as Map)['name']?.toString() ?? '';
+            assigneeName = assignees
+                .map((a) => (a as Map)['name']?.toString() ?? '')
+                .join(', ');
           } else {
             assigneeName = task?['person_name']?.toString() ?? '';
           }
@@ -397,13 +596,15 @@ class _ChatScreenState extends State<ChatScreen> {
           final priorityLabel = priorityRaw.isNotEmpty
               ? priorityRaw[0].toUpperCase() + priorityRaw.substring(1)
               : 'Medium';
-          // Extract reviewer name + id
+          // Extract all reviewer names
           String reviewerName = '';
           String reviewerId   = '';
           final reviewers = task?['reviewers'] as List?;
           if (reviewers != null && reviewers.isNotEmpty) {
-            reviewerName = (reviewers.first as Map)['name']?.toString() ?? '';
-            reviewerId   = (reviewers.first as Map)['id']?.toString()   ?? '';
+            reviewerName = reviewers
+                .map((r) => (r as Map)['name']?.toString() ?? '')
+                .join(', ');
+            reviewerId = (reviewers.first as Map)['id']?.toString() ?? '';
           }
           // Format end_date
           String? endDateStr;
@@ -420,8 +621,9 @@ class _ChatScreenState extends State<ChatScreen> {
             if (dt != null) dateStr = _fmtDate(dt);
           }
           return _Message(
-            sent: isSent,
-            time: time,
+            sent:       isSent,
+            time:       time,
+            senderName: senderName,
             task: task != null ? _ChatTask(
               messageId:    m['id'] as String? ?? '',
               taskId:       task['id'] as String? ?? '',
@@ -435,16 +637,20 @@ class _ChatScreenState extends State<ChatScreen> {
               date:                dateStr,
               endDate:             endDateStr,
               isPaused:            task['is_paused'] as bool? ?? false,
-              reviewStatus:        _parseReviewStatus(m['review_status'] as String?),
+              isNotification:      isNotif,
+              reviewStatus:        isNotif
+                  ? _TaskReviewStatus.none
+                  : _parseReviewStatus(m['review_status'] as String?),
               pendingPauseRequest: task['pending_pause_request'] as Map<String, dynamic>?,
             ) : null,
           );
         }
 
         return _Message(
-          text: m['content'] as String?,
-          sent: isSent,
-          time: time,
+          text:       m['content'] as String?,
+          sent:       isSent,
+          time:       time,
+          senderName: senderName,
         );
       }).toList().reversed.toList(); // API returns newest first, we want oldest first
     } catch (_) {
@@ -488,23 +694,47 @@ class _ChatScreenState extends State<ChatScreen> {
   // Build a _Contact from API conversation data
   _Contact _contactFromConversation(Map<String, dynamic> conv) {
     final members = (conv['members'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-    // Find the other person (not me)
+    final isGroup = conv['type'] == 'group';
+
+    // For DMs: show the other person. For groups: show the group name.
     final other = members.firstWhere(
       (m) => m['id'] != _myUserId,
       orElse: () => members.isNotEmpty ? members.first : <String, dynamic>{},
     );
-    final name = conv['name'] as String? ?? other['name'] as String? ?? 'Unknown';
+    final name = isGroup
+        ? (conv['name'] as String? ?? 'Group')
+        : (other['name'] as String? ?? 'Unknown');
     final initials = name.split(' ').map((w) => w.isNotEmpty ? w[0] : '').take(2).join().toUpperCase();
     final lastMsg = conv['last_message'] as Map<String, dynamic>?;
-    final preview = lastMsg?['content'] as String? ?? '';
+    final lastType = lastMsg?['type'] as String?;
+    final preview = lastType == 'task_created'
+        ? 'New task assigned'
+        : lastType == 'task_review'
+            ? 'Task review'
+            : lastType == 'pause_request'
+                ? 'Pause request'
+                : lastType == 'idea_request'
+                    ? 'Idea move request'
+                    : lastMsg?['content'] as String? ?? '';
+
+    // Subtitle: DM → role, Group → member names
+    final subtitle = isGroup
+        ? members.map((m) => m['name'] as String? ?? '').join(', ')
+        : other['role'] as String? ?? '';
+
+    // For DMs check live socket presence; groups don't have a single status.
+    final otherId = isGroup ? null : other['id'] as String?;
+    final status  = (!isGroup && otherId != null && _socket.isUserOnline(otherId))
+        ? _Status.online
+        : _Status.offline;
 
     return _Contact(
       id:          conv['id'] as String,
       name:        name,
-      role:        other['role'] as String? ?? '',
+      role:        subtitle,
       initials:    initials,
       avatarColor: _avatarColor(name),
-      status:      _Status.offline, // No online status yet
+      status:      status,
       lastSeen:    '',
       preview:     preview,
     );
@@ -574,8 +804,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         color: _kPrimary)),
                 const Spacer(),
                 IconButton(
-                  icon: Icon(Icons.more_vert, size: 20, color: Colors.grey[600]),
-                  onPressed: () {},
+                  icon: const Icon(Icons.edit_square, size: 18, color: _kPrimary),
+                  tooltip: 'New chat',
+                  onPressed: _showNewChatDialog,
                   visualDensity: VisualDensity.compact,
                 ),
               ],
@@ -624,10 +855,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildContactRow(_Contact c) {
     final isActive = c.id == _selectedId;
     return InkWell(
-      onTap: () {
-        setState(() => _selectedId = c.id);
-        _loadMessages(c.id);
-      },
+      onTap: () => _selectConversation(c.id),
       child: Container(
         // Subtle accent tint on the active row so it's obvious which chat is open.
         color: isActive ? _kAccent.withValues(alpha: 0.07) : null,
@@ -701,6 +929,34 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Map<String, dynamic> get _activeConv => _conversations.firstWhere(
+    (c) => c['id'] == _selectedId,
+    orElse: () => <String, dynamic>{},
+  );
+
+  bool get _isGroupChat => _activeConv['type'] == 'group';
+
+  bool get _canManageMembers {
+    if (!_isGroupChat) return false;
+    // Show the button for superAdmin, group creator, or when created_by is
+    // null (legacy groups before migration). The backend enforces the real
+    // 403 — this is just UX gating.
+    final authState = context.read<AuthBloc>().state;
+    if (authState is AuthAuthenticated &&
+        authState.user.role == UserRole.superAdmin) { return true; }
+    final createdBy = _activeConv['created_by'];
+    // If created_by is null (legacy group) or matches current user → show
+    return createdBy == null || createdBy == _myUserId;
+  }
+
+  List<Map<String, dynamic>> get _activeMembers {
+    final conv = _conversations.firstWhere(
+      (c) => c['id'] == _selectedId,
+      orElse: () => <String, dynamic>{},
+    );
+    return (conv['members'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+  }
+
   // Top bar: avatar + name + status label + call / video / more icons
   Widget _buildTopBar(_Contact c) {
     return Container(
@@ -740,21 +996,104 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           ),
           const Spacer(),
-          IconButton(
-            icon: Icon(Icons.call_outlined, size: 20, color: Colors.grey[600]),
-            onPressed: () {},
-            tooltip: 'Voice call',
+          if (_canManageMembers) ...[
+            IconButton(
+              icon: Icon(Icons.group_outlined, size: 20, color: Colors.grey[600]),
+              onPressed: _showManageMembers,
+              tooltip: 'Members',
+            ),
+            IconButton(
+              icon: Icon(Icons.delete_outline_rounded, size: 20, color: Colors.grey[600]),
+              onPressed: _confirmDeleteConversation,
+              tooltip: 'Delete group',
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmDeleteConversation() async {
+    final name = _active.name;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        title: const Text('Delete group?',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+        content: Text(
+          'Are you sure you want to delete "$name"? All messages will be lost.',
+          style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
           ),
-          IconButton(
-            icon: Icon(Icons.videocam_outlined, size: 20, color: Colors.grey[600]),
-            onPressed: () {},
-            tooltip: 'Video call',
-          ),
-          IconButton(
-            icon: Icon(Icons.more_vert, size: 20, color: Colors.grey[600]),
-            onPressed: () {},
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFFEF4444)),
+            child: const Text('Delete'),
           ),
         ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _api.deleteConversation(_selectedId);
+      setState(() => _selectedId = '');
+      _messages.clear();
+      _loadConversations();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to delete group')),
+        );
+      }
+    }
+  }
+
+  Future<void> _showManageMembers() async {
+    // Load all users for the "add" picker
+    List<Map<String, dynamic>> allUsers = [];
+    try {
+      final res = await _api.getUserDirectory();
+      allUsers = (res.data as List).cast<Map<String, dynamic>>();
+    } catch (_) {}
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => _ManageMembersDialog(
+        members:  _activeMembers,
+        allUsers: allUsers,
+        myUserId: _myUserId ?? '',
+        onAdd: (ids) async {
+          try {
+            await _api.addGroupMembers(_selectedId, ids);
+            await _loadConversations();
+            if (mounted) setState(() {});
+          } catch (_) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Failed to add members')),
+              );
+            }
+          }
+        },
+        onRemove: (userId) async {
+          try {
+            await _api.removeGroupMember(_selectedId, userId);
+            await _loadConversations();
+            if (mounted) setState(() {});
+          } catch (e) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Failed to remove member: $e')),
+              );
+            }
+          }
+        },
       ),
     );
   }
@@ -824,6 +1163,16 @@ class _ChatScreenState extends State<ChatScreen> {
             crossAxisAlignment:
                 isSent ? CrossAxisAlignment.end : CrossAxisAlignment.start,
             children: [
+              // Sender name — shown in group chats for received messages
+              if (!isSent && _isGroupChat && msg.senderName != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 3),
+                  child: Text(msg.senderName!,
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: _avatarColor(msg.senderName!))),
+                ),
               // Bubble — accent bg for sent, light gray for received
               Container(
                 constraints: const BoxConstraints(maxWidth: 340),
@@ -834,7 +1183,6 @@ class _ChatScreenState extends State<ChatScreen> {
                   borderRadius: BorderRadius.only(
                     topLeft:     const Radius.circular(12),
                     topRight:    const Radius.circular(12),
-                    // "tail" corner points toward the avatar side
                     bottomLeft:  Radius.circular(isSent ? 12 : 2),
                     bottomRight: Radius.circular(isSent ? 2  : 12),
                   ),
@@ -846,11 +1194,13 @@ class _ChatScreenState extends State<ChatScreen> {
                         color: isSent ? Colors.white : _kPrimary)),
               ),
               const SizedBox(height: 4),
-              // Timestamp: include sender name for received messages
+              // Timestamp
               Text(
                 isSent
                     ? msg.time
-                    : '${contact.name}, ${msg.time}',
+                    : _isGroupChat
+                        ? msg.time
+                        : '${contact.name}, ${msg.time}',
                 style: TextStyle(fontSize: 10, color: Colors.grey[400]),
               ),
             ],
@@ -1480,15 +1830,18 @@ class _ChatTaskCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isPending   = task.reviewStatus == _TaskReviewStatus.pending;
-    final isCompleted = task.reviewStatus == _TaskReviewStatus.completed;
-    final isRejected  = task.reviewStatus == _TaskReviewStatus.rejected;
+    final isNotif     = task.isNotification;
+    final isPending   = !isNotif && task.reviewStatus == _TaskReviewStatus.pending;
+    final isCompleted = !isNotif && task.reviewStatus == _TaskReviewStatus.completed;
+    final isRejected  = !isNotif && task.reviewStatus == _TaskReviewStatus.rejected;
 
-    final borderColor = isCompleted
-        ? _kGreen
-        : isRejected
-            ? _kHigh
-            : _kBorder;
+    final borderColor = isNotif
+        ? const Color(0xFF6366F1)
+        : isCompleted
+            ? _kGreen
+            : isRejected
+                ? _kHigh
+                : _kBorder;
 
     return GestureDetector(
       onTap: onTap,
@@ -1518,25 +1871,33 @@ class _ChatTaskCard extends StatelessWidget {
             ),
             child: Row(children: [
               Icon(
-                isCompleted
-                    ? Icons.check_circle_rounded
-                    : isRejected
-                        ? Icons.cancel_rounded
-                        : Icons.assignment_outlined,
+                isNotif
+                    ? Icons.task_alt_rounded
+                    : isCompleted
+                        ? Icons.check_circle_rounded
+                        : isRejected
+                            ? Icons.cancel_rounded
+                            : Icons.assignment_outlined,
                 size:  15,
-                color: isCompleted ? _kGreen : isRejected ? _kHigh : _kPrimary,
+                color: isNotif
+                    ? const Color(0xFF6366F1)
+                    : isCompleted ? _kGreen : isRejected ? _kHigh : _kPrimary,
               ),
               const SizedBox(width: 6),
               Text(
-                isCompleted
-                    ? 'Task Completed'
-                    : isRejected
-                        ? 'Task Rejected'
-                        : 'Task Review',
+                isNotif
+                    ? 'New Task Assigned'
+                    : isCompleted
+                        ? 'Task Completed'
+                        : isRejected
+                            ? 'Task Rejected'
+                            : 'Task Review',
                 style: TextStyle(
                   fontSize:   12,
                   fontWeight: FontWeight.w600,
-                  color: isCompleted ? _kGreen : isRejected ? _kHigh : _kPrimary,
+                  color: isNotif
+                      ? const Color(0xFF6366F1)
+                      : isCompleted ? _kGreen : isRejected ? _kHigh : _kPrimary,
                 ),
               ),
             ]),
@@ -1636,7 +1997,8 @@ class _ChatTaskCard extends StatelessWidget {
           ),
 
           // ── Pause approve/deny (when pause request pending & viewer is reviewer) ──
-          if (task.pendingPauseRequest != null &&
+          if (!isNotif &&
+              task.pendingPauseRequest != null &&
               currentUserId != null &&
               currentUserId == task.reviewerId) ...[
             const Divider(height: 1, color: _kBorder),
@@ -1695,7 +2057,7 @@ class _ChatTaskCard extends StatelessWidget {
                 ],
               ),
             ),
-          ] else if (task.pendingPauseRequest != null) ...[
+          ] else if (!isNotif && task.pendingPauseRequest != null) ...[
             // Assignee sees read-only pending pill
             const Divider(height: 1, color: _kBorder),
             Padding(
@@ -1746,7 +2108,7 @@ class _ChatTaskCard extends StatelessWidget {
           ],
 
           // ── Status pill (after action taken) ────────────────────────────
-          if (!isPending)
+          if (!isNotif && !isPending)
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
               child: Container(
@@ -2132,4 +2494,477 @@ class _Badge extends StatelessWidget {
     child: Text(label,
         style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
   );
+}
+
+// ─── New Chat Dialog ─────────────────────────────────────────────────────────
+
+class _NewChatDialog extends StatefulWidget {
+  final List<Map<String, dynamic>> users;
+  final void Function(String userId)                    onUserSelected;
+  final void Function(String name, List<String> ids)    onGroupCreated;
+
+  const _NewChatDialog({
+    required this.users,
+    required this.onUserSelected,
+    required this.onGroupCreated,
+  });
+
+  @override
+  State<_NewChatDialog> createState() => _NewChatDialogState();
+}
+
+class _NewChatDialogState extends State<_NewChatDialog> {
+  bool _groupMode = false;
+  final Set<String> _selected = {};
+  final _groupNameCtrl = TextEditingController();
+  final _searchCtrl    = TextEditingController();
+  String _search = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _searchCtrl.addListener(() => setState(() => _search = _searchCtrl.text));
+  }
+
+  @override
+  void dispose() {
+    _groupNameCtrl.dispose();
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  List<Map<String, dynamic>> get _filtered => _search.isEmpty
+      ? widget.users
+      : widget.users
+          .where((u) =>
+              (u['name'] as String).toLowerCase().contains(_search.toLowerCase()))
+          .toList();
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: SizedBox(
+        width: 360,
+        height: 480,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ── Header ─────────────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 12, 0),
+              child: Row(children: [
+                Text(_groupMode ? 'New Group' : 'New Chat',
+                    style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: _kPrimary)),
+                const Spacer(),
+                TextButton(
+                  onPressed: () => setState(() {
+                    _groupMode = !_groupMode;
+                    _selected.clear();
+                  }),
+                  child: Text(
+                    _groupMode ? 'Direct' : 'Group',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18),
+                  onPressed: () => Navigator.of(context).pop(),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ]),
+            ),
+
+            // ── Group name field (only in group mode) ──────────────────
+            if (_groupMode)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                child: TextField(
+                  controller: _groupNameCtrl,
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    hintText:  'Group name',
+                    hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                    isDense:   true,
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ),
+
+            // ── Search ─────────────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: _kBg,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: _kBorder),
+                ),
+                child: TextField(
+                  controller: _searchCtrl,
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    hintText:  'Search people...',
+                    hintStyle: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                    prefixIcon: Icon(Icons.search, size: 18, color: Colors.grey[400]),
+                    border: InputBorder.none,
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                  ),
+                ),
+              ),
+            ),
+
+            // ── User list ──────────────────────────────────────────────
+            Expanded(
+              child: ListView.builder(
+                itemCount: _filtered.length,
+                itemBuilder: (_, i) {
+                  final u    = _filtered[i];
+                  final id   = u['id'] as String;
+                  final name = u['name'] as String;
+                  final role = u['role'] as String? ?? '';
+                  final initials = name
+                      .split(' ')
+                      .map((w) => w.isNotEmpty ? w[0] : '')
+                      .take(2)
+                      .join()
+                      .toUpperCase();
+                  final isSel = _selected.contains(id);
+
+                  return InkWell(
+                    onTap: () {
+                      if (_groupMode) {
+                        setState(() {
+                          if (isSel) {
+                            _selected.remove(id);
+                          } else {
+                            _selected.add(id);
+                          }
+                        });
+                      } else {
+                        widget.onUserSelected(id);
+                      }
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 8),
+                      child: Row(children: [
+                        CircleAvatar(
+                          radius: 18,
+                          backgroundColor:
+                              _kAccent.withValues(alpha: 0.12),
+                          child: Text(initials,
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: _kAccent)),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(name,
+                                  style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: _kPrimary)),
+                              if (role.isNotEmpty)
+                                Text(role,
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey[500])),
+                            ],
+                          ),
+                        ),
+                        if (_groupMode)
+                          Container(
+                            width: 20, height: 20,
+                            decoration: BoxDecoration(
+                              color: isSel ? _kAccent : Colors.transparent,
+                              border: Border.all(
+                                  color: isSel ? _kAccent : _kBorder,
+                                  width: 1.5),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: isSel
+                                ? const Icon(Icons.check,
+                                    size: 13, color: Colors.white)
+                                : null,
+                          ),
+                      ]),
+                    ),
+                  );
+                },
+              ),
+            ),
+
+            // ── Create group button (only in group mode) ───────────────
+            if (_groupMode)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: _selected.length < 2 ||
+                            _groupNameCtrl.text.trim().isEmpty
+                        ? null
+                        : () => widget.onGroupCreated(
+                              _groupNameCtrl.text.trim(),
+                              _selected.toList(),
+                            ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _kAccent,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    child: Text(
+                      'Create Group (${_selected.length} members)',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Manage Group Members Dialog ─────────────────────────────────────────────
+
+class _ManageMembersDialog extends StatefulWidget {
+  final List<Map<String, dynamic>> members;
+  final List<Map<String, dynamic>> allUsers;
+  final String                     myUserId;
+  final Future<void> Function(List<String> ids) onAdd;
+  final Future<void> Function(String userId)    onRemove;
+
+  const _ManageMembersDialog({
+    required this.members,
+    required this.allUsers,
+    required this.myUserId,
+    required this.onAdd,
+    required this.onRemove,
+  });
+
+  @override
+  State<_ManageMembersDialog> createState() => _ManageMembersDialogState();
+}
+
+class _ManageMembersDialogState extends State<_ManageMembersDialog> {
+  late List<Map<String, dynamic>> _members;
+  bool _showAddPicker = false;
+  final Set<String> _toAdd = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _members = List.from(widget.members);
+  }
+
+  List<Map<String, dynamic>> get _nonMembers {
+    final memberIds = _members.map((m) => m['id']).toSet();
+    return widget.allUsers.where((u) => !memberIds.contains(u['id'])).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: SizedBox(
+        width: 340,
+        height: 440,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ── Header ───────────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 12, 12),
+              child: Row(children: [
+                const Text('Group Members',
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: _kPrimary)),
+                const Spacer(),
+                if (!_showAddPicker)
+                  TextButton.icon(
+                    onPressed: () => setState(() => _showAddPicker = true),
+                    icon: const Icon(Icons.person_add_rounded, size: 14),
+                    label: const Text('Add', style: TextStyle(fontSize: 12)),
+                  ),
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18),
+                  onPressed: () => Navigator.of(context).pop(),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ]),
+            ),
+
+            // ── Add-member picker ────────────────────────────────────
+            if (_showAddPicker) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Container(
+                  constraints: const BoxConstraints(maxHeight: 140),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: _kBorder),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: _nonMembers.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.all(16),
+                          child: Text('Everyone is already in this group',
+                              style: TextStyle(fontSize: 12, color: Colors.grey)),
+                        )
+                      : ListView(
+                          shrinkWrap: true,
+                          children: _nonMembers.map((u) {
+                            final id = u['id'] as String;
+                            final name = u['name'] as String;
+                            final sel = _toAdd.contains(id);
+                            return InkWell(
+                              onTap: () => setState(() {
+                                if (sel) { _toAdd.remove(id); } else { _toAdd.add(id); }
+                              }),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 6),
+                                child: Row(children: [
+                                  Icon(
+                                    sel ? Icons.check_box : Icons.check_box_outline_blank,
+                                    size: 16,
+                                    color: sel ? _kAccent : Colors.grey[400],
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(name,
+                                      style: const TextStyle(
+                                          fontSize: 13, color: _kPrimary)),
+                                ]),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                ),
+              ),
+              if (_toAdd.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: () async {
+                        await widget.onAdd(_toAdd.toList());
+                        if (mounted) {
+                          // Refresh local state
+                          for (final id in _toAdd) {
+                            final u = widget.allUsers.firstWhere(
+                              (x) => x['id'] == id,
+                              orElse: () => <String, dynamic>{},
+                            );
+                            if (u.isNotEmpty) _members.add(u);
+                          }
+                          setState(() {
+                            _toAdd.clear();
+                            _showAddPicker = false;
+                          });
+                        }
+                      },
+                      style: FilledButton.styleFrom(
+                        backgroundColor: _kAccent,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                      child: Text('Add ${_toAdd.length} member${_toAdd.length == 1 ? '' : 's'}',
+                          style: const TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                ),
+            ],
+
+            const Divider(height: 1),
+
+            // ── Current members list ─────────────────────────────────
+            Expanded(
+              child: ListView.builder(
+                itemCount: _members.length,
+                itemBuilder: (_, i) {
+                  final m    = _members[i];
+                  final id   = m['id'] as String;
+                  final name = m['name'] as String? ?? '';
+                  final role = m['role'] as String? ?? '';
+                  final isMe = id == widget.myUserId;
+                  final initials = name
+                      .split(' ')
+                      .map((w) => w.isNotEmpty ? w[0] : '')
+                      .take(2)
+                      .join()
+                      .toUpperCase();
+
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 8),
+                    child: Row(children: [
+                      CircleAvatar(
+                        radius: 16,
+                        backgroundColor: _kAccent.withValues(alpha: 0.12),
+                        child: Text(initials,
+                            style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: _kAccent)),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(isMe ? '$name (you)' : name,
+                                style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: _kPrimary)),
+                            if (role.isNotEmpty)
+                              Text(role,
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey[500])),
+                          ],
+                        ),
+                      ),
+                      // Remove button — can't remove yourself
+                      if (!isMe && _members.length > 2)
+                        IconButton(
+                          icon: Icon(Icons.remove_circle_outline,
+                              size: 18, color: Colors.grey[400]),
+                          tooltip: 'Remove',
+                          onPressed: () async {
+                            await widget.onRemove(id);
+                            if (mounted) {
+                              setState(() => _members.removeAt(i));
+                            }
+                          },
+                          visualDensity: VisualDensity.compact,
+                        ),
+                    ]),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

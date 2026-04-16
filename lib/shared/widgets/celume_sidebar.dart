@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
@@ -6,12 +7,37 @@ import '../../core/auth/user_role.dart';
 import '../../core/config/app_colors.dart';
 import '../../core/config/app_config.dart';
 import '../../core/models/user.dart';
+import '../../core/socket/socket_service.dart';
 
-class CelumeSidebar extends StatelessWidget {
+class CelumeSidebar extends StatefulWidget {
   final User user;
   final VoidCallback? onCollapse;
 
   const CelumeSidebar({super.key, required this.user, this.onCollapse});
+
+  @override
+  State<CelumeSidebar> createState() => _CelumeSidebarState();
+}
+
+class _CelumeSidebarState extends State<CelumeSidebar> {
+  int _unreadChat = 0;
+  StreamSubscription<int>? _unreadSub;
+
+  @override
+  void initState() {
+    super.initState();
+    final socket = context.read<SocketService>();
+    _unreadChat = socket.unreadCount;
+    _unreadSub = socket.onUnreadCount.listen((count) {
+      if (mounted) setState(() => _unreadChat = count);
+    });
+  }
+
+  @override
+  void dispose() {
+    _unreadSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -21,13 +47,13 @@ class CelumeSidebar extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // ── Top bar: collapse button ────────────────────────────────────
-        if (onCollapse != null)
+        if (widget.onCollapse != null)
           Padding(
             padding: const EdgeInsets.only(top: 12, right: 12),
             child: Align(
               alignment: Alignment.topRight,
               child: InkWell(
-                onTap: onCollapse,
+                onTap: widget.onCollapse,
                 borderRadius: BorderRadius.circular(6),
                 child: Container(
                   padding: const EdgeInsets.all(6),
@@ -67,7 +93,7 @@ class CelumeSidebar extends StatelessWidget {
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
-              user.role.displayName,
+              widget.user.role.displayName,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ),
@@ -86,42 +112,43 @@ class CelumeSidebar extends StatelessWidget {
                   isActive: currentPath == '/dashboard',
                   onTap: () => _navigate(context, '/dashboard'),
                 ),
-                if (user.hasPageAccess(AppConfig.pageTasks))
+                if (widget.user.hasPageAccess(AppConfig.pageTasks))
                   _NavItem(
                     icon: Icons.task_alt,
                     label: 'Tasks',
                     isActive: currentPath == '/tasks',
                     onTap: () => _navigate(context, '/tasks'),
                   ),
-                if (user.hasPageAccess(AppConfig.pageAttendance))
+                if (widget.user.hasPageAccess(AppConfig.pageAttendance))
                   _NavItem(
                     icon: Icons.access_time,
                     label: 'Attendance',
                     isActive: currentPath == '/attendance',
                     onTap: () => _navigate(context, '/attendance'),
                   ),
-                if (user.hasPageAccess(AppConfig.pageChat))
+                if (widget.user.hasPageAccess(AppConfig.pageChat))
                   _NavItem(
                     icon: Icons.chat_bubble_outline,
                     label: 'Chat',
                     isActive: currentPath == '/chat',
+                    badge: _unreadChat > 0 ? _unreadChat : null,
                     onTap: () => _navigate(context, '/chat'),
                   ),
-                if (user.hasPageAccess(AppConfig.pageAnalytics))
+                if (widget.user.hasPageAccess(AppConfig.pageAnalytics))
                   _NavItem(
                     icon: Icons.bar_chart,
                     label: 'Analytics',
                     isActive: currentPath == '/analytics',
                     onTap: () => _navigate(context, '/analytics'),
                   ),
-                if (user.hasPageAccess(AppConfig.pageClients))
+                if (widget.user.hasPageAccess(AppConfig.pageClients))
                   _NavItem(
                     icon: Icons.people_outline_rounded,
                     label: 'Clients',
                     isActive: currentPath == '/clients',
                     onTap: () => _navigate(context, '/clients'),
                   ),
-                if (user.role == UserRole.superAdmin)
+                if (widget.user.role == UserRole.superAdmin)
                   _NavItem(
                     icon: Icons.admin_panel_settings,
                     label: 'User Management',
@@ -154,16 +181,18 @@ class CelumeSidebar extends StatelessWidget {
 }
 
 class _NavItem extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isActive;
+  final IconData   icon;
+  final String     label;
+  final bool       isActive;
   final VoidCallback onTap;
+  final int?       badge; // unread count — null means no badge
 
   const _NavItem({
     required this.icon,
     required this.label,
     required this.isActive,
     required this.onTap,
+    this.badge,
   });
 
   @override
@@ -177,21 +206,32 @@ class _NavItem extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       child: ListTile(
-        leading: Icon(icon,
-            color: isActive ? AppColors.accent : AppColors.navItemText,
-            size: 20),
+        leading: badge != null
+            ? Badge(
+                label: Text(
+                  badge! > 99 ? '99+' : '$badge',
+                  style: const TextStyle(fontSize: 10),
+                ),
+                backgroundColor: AppColors.accent,
+                child: Icon(icon,
+                    color: isActive ? AppColors.accent : AppColors.navItemText,
+                    size: 20),
+              )
+            : Icon(icon,
+                color: isActive ? AppColors.accent : AppColors.navItemText,
+                size: 20),
         title: Text(
           label,
           style: TextStyle(
-            color: isActive ? Colors.white : AppColors.navItemText,
-            fontSize: 14,
+            color:      isActive ? Colors.white : AppColors.navItemText,
+            fontSize:   14,
             fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
           ),
         ),
         onTap: onTap,
-        hoverColor: AppColors.navItemHover,
+        hoverColor:     AppColors.navItemHover,
         contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-        dense: true,
+        dense:          true,
       ),
     );
   }
