@@ -195,7 +195,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _loadAttendance();
     _hScroll.addListener(_onHScrollChange);
     _hScrollEmp.addListener(_onHScrollEmpChange);
-    _hScrollBar.addListener(_onHScrollBarChange);
+    // _hScrollBar listener removed — old bottom scrollbar replaced by Scrollbar widget
     _vScroll.addListener(_onVScrollChange);
     // Print a scroll-chain report every second.
     _perfReportTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -212,11 +212,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     });
   }
 
-  // ── Horizontal sync (3-way: header ↔ body ↔ scrollbar) ──────────────────────
+  // ── Horizontal sync (header ↔ body) ─────────────────────────────────────────
   void _syncHTo(double v) {
     if (_syncingH) return;
     _syncingH = true;
-    for (final c in [_hScroll, _hScrollEmp, _hScrollBar]) {
+    for (final c in [_hScroll, _hScrollEmp]) {
       if (c.hasClients) c.jumpTo(v.clamp(0.0, c.position.maxScrollExtent));
     }
     _syncingH = false;
@@ -224,7 +224,6 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   void _onHScrollChange()    { _hChangeEvents++; _syncHTo(_hScroll.offset); }
   void _onHScrollEmpChange() { _syncHTo(_hScrollEmp.offset); }
-  void _onHScrollBarChange() { _syncHTo(_hScrollBar.offset); }
 
   // ── Vertical sync (date column → employee column) ────────────────────────────
   void _onVScrollChange() {
@@ -553,7 +552,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _tableFocusNode.dispose();
     _hScroll.removeListener(_onHScrollChange);
     _hScrollEmp.removeListener(_onHScrollEmpChange);
-    _hScrollBar.removeListener(_onHScrollBarChange);
+    // _hScrollBar listener already removed
     _vScroll.removeListener(_onVScrollChange);
     _hScroll.dispose();
     _hScrollEmp.dispose();
@@ -776,46 +775,95 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       return const Center(child: CircularProgressIndicator());
     }
 
+    final isMobile = MediaQuery.of(context).size.width < 700;
+
+    final topBar = Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+      child: Row(
+        children: [
+          const Text('Attendance',
+              style: TextStyle(
+                  fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(width: 12),
+          // ── Month navigator ──────────────────────────────────────────
+          _MonthNav(
+            month:   _viewMonth,
+            onPrev:  () => _changeMonth(-1),
+            onNext:  () => _changeMonth(1),
+            onToday: _isViewingCurrentMonth ? null : () => _jumpToMonth(
+                DateTime(DateTime.now().year, DateTime.now().month, 1)),
+          ),
+          const Spacer(),
+          isMobile
+              ? IconButton(
+                  onPressed: _importExcel,
+                  icon: const Icon(Icons.upload_file_rounded, size: 18),
+                  style: IconButton.styleFrom(
+                    foregroundColor: const Color(0xFF6366F1),
+                  ),
+                  tooltip: 'Import Excel',
+                )
+              : OutlinedButton.icon(
+                  onPressed: _importExcel,
+                  icon: const Icon(Icons.upload_file_rounded, size: 14),
+                  label: const Text('Import Excel',
+                      style: TextStyle(fontSize: 13)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF6366F1),
+                    side: const BorderSide(color: Color(0xFF6366F1)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    minimumSize:   Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+        ],
+      ),
+    );
+
+    if (isMobile) {
+      return DefaultTabController(
+        length: 2,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            topBar,
+            Container(
+              color: Colors.white,
+              child: const TabBar(
+                tabs: [
+                  Tab(text: 'Table'),
+                  Tab(text: 'Summary'),
+                ],
+                labelColor: _kAccent,
+                unselectedLabelColor: Color(0xFF6B7280),
+                indicatorColor: _kAccent,
+              ),
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  _buildTableWithHScroll(),
+                  Container(
+                    decoration: const BoxDecoration(
+                      border: Border(left: BorderSide(color: _kBorder)),
+                    ),
+                    child: _AnalysisPanel(summaries: _summaries),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // ── Top bar ──────────────────────────────────────────────────────────
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-          child: Row(
-            children: [
-              const Text('Attendance',
-                  style: TextStyle(
-                      fontSize: 20, fontWeight: FontWeight.bold)),
-              const SizedBox(width: 20),
-              // ── Month navigator ──────────────────────────────────────────
-              _MonthNav(
-                month:   _viewMonth,
-                onPrev:  () => _changeMonth(-1),
-                onNext:  () => _changeMonth(1),
-                onToday: _isViewingCurrentMonth ? null : () => _jumpToMonth(
-                    DateTime(DateTime.now().year, DateTime.now().month, 1)),
-              ),
-              const Spacer(),
-              OutlinedButton.icon(
-                onPressed: _importExcel,
-                icon: const Icon(Icons.upload_file_rounded, size: 14),
-                label: const Text('Import Excel',
-                    style: TextStyle(fontSize: 13)),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: const Color(0xFF6366F1),
-                  side: const BorderSide(color: Color(0xFF6366F1)),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8)),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 10),
-                  minimumSize:   Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-              ),
-            ],
-          ),
-        ),
+        topBar,
         // ── Main body: table left | analysis right ────────────────────────
         Expanded(
           child: Row(
@@ -946,7 +994,18 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         // Listener wraps both columns so scroll works everywhere.
         // Normal wheel → vertical, Shift+wheel → horizontal.
         Expanded(
-          child: Listener(
+          child: GestureDetector(
+            // Touch-drag support (mobile web) — PointerScrollEvent doesn't fire
+            // for touch gestures, so we handle vertical drag explicitly.
+            onVerticalDragUpdate: (details) {
+              if (_vScroll.hasClients) {
+                _vScroll.jumpTo(
+                  (_vScroll.offset - details.delta.dy)
+                      .clamp(0.0, _vScroll.position.maxScrollExtent),
+                );
+              }
+            },
+            child: Listener(
             onPointerDown: (event) {
               if (event.buttons & kSecondaryMouseButton != 0) {
                 _rightButtonHeld = true;
@@ -1060,11 +1119,13 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               // RIGHT: employee cells — h-scroll via SingleChildScrollView,
               // v-scroll synced from _vScroll via _onVScrollChange.
               Expanded(
-                child: SingleChildScrollView(
+                child: Scrollbar(
+                  controller: _hScrollEmp,
+                  thumbVisibility: true,
+                  notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
+                  child: SingleChildScrollView(
                     controller: _hScrollEmp,
                     scrollDirection: Axis.horizontal,
-                    // Default physics: handles drag + Shift+wheel (browser sends dx) natively.
-                    // Vertical wheel is intercepted by the Listener above.
                     child: SizedBox(
                       width: totalEmpW,
                       child: ListView.builder(
@@ -1147,34 +1208,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     ),
                   ),
                 ),
+                ),
               ],
             ),
           ),
+          ),
         ),
 
-        // ── Bottom horizontal scrollbar ─────────────────────────────────────
-        Container(
-          height: 14,
-          decoration: const BoxDecoration(
-            border: Border(top: BorderSide(color: _kBorder)),
-          ),
-          child: Row(
-            children: [
-              SizedBox(width: canEdit ? delWidth + dateWidth : dateWidth),
-              Expanded(
-                child: Scrollbar(
-                  controller: _hScrollBar,
-                  thumbVisibility: true,
-                  child: SingleChildScrollView(
-                    controller: _hScrollBar,
-                    scrollDirection: Axis.horizontal,
-                    child: SizedBox(width: totalEmpW, height: 14),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+        // Old bottom scrollbar removed — Scrollbar now wraps the body directly.
       ],
     );
   }

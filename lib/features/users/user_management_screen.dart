@@ -210,31 +210,47 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isMobile = MediaQuery.of(context).size.width < 700;
     final showForm = _isCreating || _selectedUser != null;
 
     return Padding(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.all(isMobile ? 16 : 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // ── Header ────────────────────────────────────────────────────
           Row(
             children: [
-              const Text(
+              Text(
                 'User Management',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-              const Spacer(),
-              ElevatedButton.icon(
-                onPressed: _openCreateForm,
-                icon: const Icon(Icons.add, size: 18),
-                label: const Text('Create User'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.accent,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                style: TextStyle(
+                  fontSize: isMobile ? 20 : 24,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
+              const Spacer(),
+              isMobile
+                  ? IconButton(
+                      onPressed: () => _openCreateFormMobile(context),
+                      icon: const Icon(Icons.add),
+                      style: IconButton.styleFrom(
+                        backgroundColor: AppColors.accent,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                      ),
+                    )
+                  : ElevatedButton.icon(
+                      onPressed: _openCreateForm,
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('Create User'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.accent,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
             ],
           ),
           const SizedBox(height: 24),
@@ -248,26 +264,151 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text(_error!, style: const TextStyle(color: AppColors.error)),
+                            Text(_error!,
+                                style: const TextStyle(color: AppColors.error)),
                             const SizedBox(height: 12),
-                            ElevatedButton(onPressed: _loadUsers, child: const Text('Retry')),
+                            ElevatedButton(
+                                onPressed: _loadUsers,
+                                child: const Text('Retry')),
                           ],
                         ),
                       )
-                    : Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(flex: 3, child: _buildUserTable()),
-                          if (showForm) ...[
-                            const SizedBox(width: 24),
-                            Expanded(flex: 2, child: _buildFormPanel()),
-                          ],
-                        ],
-                      ),
+                    : isMobile
+                        ? _buildUserCards(context)
+                        : Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(flex: 3, child: _buildUserTable()),
+                              if (showForm) ...[
+                                const SizedBox(width: 24),
+                                Expanded(flex: 2, child: _buildFormPanel()),
+                              ],
+                            ],
+                          ),
           ),
         ],
       ),
     );
+  }
+
+  // ── Mobile card list ─────────────────────────────────────────────────────
+
+  Widget _buildUserCards(BuildContext context) {
+    return ListView.separated(
+      itemCount: _users.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 10),
+      itemBuilder: (_, i) {
+        final user = _users[i];
+        final role = UserRole.fromString(user['role'] ?? 'worker');
+        final isActive = user['is_active'] as bool? ?? true;
+        return Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.05),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(user['name'] ?? '',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w600, fontSize: 14)),
+                    const SizedBox(height: 2),
+                    Text(user['email'] ?? '',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                        overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 6),
+                    Row(children: [
+                      _RoleBadge(role: role),
+                      const SizedBox(width: 6),
+                      _StatusBadge(isActive: isActive),
+                    ]),
+                  ],
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.edit, size: 18),
+                tooltip: 'Edit',
+                onPressed: () => _openEditFormMobile(context, user),
+                color: Colors.grey[600],
+              ),
+              IconButton(
+                icon: Icon(
+                  isActive ? Icons.block : Icons.check_circle_outline,
+                  size: 18,
+                ),
+                tooltip: isActive ? 'Deactivate' : 'Activate',
+                onPressed: () => _toggleActive(user),
+                color: isActive ? AppColors.error : AppColors.success,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _openCreateFormMobile(BuildContext context) {
+    _openCreateForm();
+    _showFormBottomSheet(context);
+  }
+
+  Future<void> _openEditFormMobile(
+      BuildContext context, Map<String, dynamic> user) async {
+    await _openEditForm(user);
+    if (mounted) _showFormBottomSheet(context);
+  }
+
+  void _showFormBottomSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.92,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        builder: (_, scrollCtrl) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: Column(
+            children: [
+              // drag indicator
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(top: 12, bottom: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: SingleChildScrollView(
+                  controller: scrollCtrl,
+                  padding: const EdgeInsets.all(20),
+                  child: _buildFormPanel(),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ).whenComplete(() => _closeForm());
   }
 
   Widget _buildUserTable() {

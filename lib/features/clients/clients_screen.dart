@@ -282,6 +282,40 @@ class _ClientsScreenState extends State<ClientsScreen> {
   @override
   Widget build(BuildContext context) {
     final flags = _flags;
+    final isMobile = MediaQuery.of(context).size.width < 700;
+
+    if (isMobile) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _TopBar(onAdd: _showAddClientDialog),
+          if (flags.isNotEmpty) _RedFlagsSection(flags: flags),
+          _FilterBar(
+            active: _filterHealth,
+            onSelect: (h) =>
+                setState(() => _filterHealth = _filterHealth == h ? null : h),
+          ),
+          Expanded(
+            child: _filtered.isEmpty
+                ? const Center(
+                    child: Text('No clients match this filter.',
+                        style: TextStyle(color: _kMuted, fontSize: 14)))
+                : _ClientGrid(
+                    clients: _filtered,
+                    selectedId: _selected?.id,
+                    onTap: (c) {
+                      setState(() =>
+                          _selected = _selected?.id == c.id ? null : c);
+                      if (_selected != null) {
+                        _showDetailBottomSheet(context, _selected!);
+                      }
+                    },
+                  ),
+          ),
+        ],
+      );
+    }
+
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -342,6 +376,48 @@ class _ClientsScreenState extends State<ClientsScreen> {
         ),
       ],
     );
+  }
+
+  void _showDetailBottomSheet(BuildContext context, Client client) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.88,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        builder: (_, scrollCtrl) => Container(
+          decoration: const BoxDecoration(
+            color: _kSurface,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: Column(
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(top: 12, bottom: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: _ClientDetailPanel(
+                  key: ValueKey(client.id),
+                  client: client,
+                  onClose: () => Navigator.of(context).pop(),
+                  onChanged: () => setState(() {}),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ).whenComplete(() => setState(() => _selected = null));
   }
 
   // ── Add client dialog (stub — pre-wired for backend) ──────────────────────
@@ -602,14 +678,19 @@ class _ClientGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (_, constraints) {
-      final cols = constraints.maxWidth >= 900 ? 3 : 2;
+      final cols = constraints.maxWidth >= 900
+          ? 3
+          : constraints.maxWidth >= 500
+              ? 2
+              : 1;
+      final aspectRatio = cols == 1 ? 2.2 : 1.65;
       return GridView.builder(
         padding:   const EdgeInsets.all(20),
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
           crossAxisCount:   cols,
           mainAxisSpacing:  14,
           crossAxisSpacing: 14,
-          childAspectRatio: 1.65,
+          childAspectRatio: aspectRatio,
         ),
         itemCount: clients.length,
         itemBuilder: (_, i) => _ClientCard(

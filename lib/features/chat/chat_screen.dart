@@ -27,6 +27,7 @@ class _Contact {
   final _Status status;
   final String  lastSeen;  // display string e.g. "15 mins"
   final String  preview;   // last message snippet
+  final int     unreadCount;
 
   const _Contact({
     required this.id,
@@ -37,6 +38,7 @@ class _Contact {
     required this.status,
     required this.lastSeen,
     required this.preview,
+    this.unreadCount = 0,
   });
 }
 
@@ -318,6 +320,9 @@ class _ChatScreenState extends State<ChatScreen> {
   List<_Message> _messages = [];
   String? _myUserId;
 
+  // Per-conversation unread count (tracked via socket within this session)
+  final Map<String, int> _unreadByConv = {};
+
   // Socket subscriptions
   StreamSubscription<Map<String, dynamic>>? _newMsgSub;
   StreamSubscription<Map<String, dynamic>>? _reviewUpdatedSub;
@@ -360,6 +365,9 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() => _messages.add(parsed));
         _scrollToBottom();
       }
+    } else if (convId != null && mounted) {
+      // Not the active chat — bump the per-conversation unread badge
+      setState(() => _unreadByConv[convId] = (_unreadByConv[convId] ?? 0) + 1);
     }
   }
 
@@ -446,7 +454,10 @@ class _ChatScreenState extends State<ChatScreen> {
   void _selectConversation(String convId) {
     if (_selectedId == convId) return;
     if (_selectedId.isNotEmpty) _socket.leaveConversation(_selectedId);
-    setState(() => _selectedId = convId);
+    setState(() {
+      _selectedId = convId;
+      _unreadByConv.remove(convId);
+    });
     _socket.joinConversation(convId);
     _loadMessages(convId);
   }
@@ -717,10 +728,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     ? 'Idea move request'
                     : lastMsg?['content'] as String? ?? '';
 
-    // Subtitle: DM → role, Group → member names
+    // Subtitle: DM → last message preview, Group → member names
     final subtitle = isGroup
         ? members.map((m) => m['name'] as String? ?? '').join(', ')
-        : other['role'] as String? ?? '';
+        : preview;
 
     // For DMs check live socket presence; groups don't have a single status.
     final otherId = isGroup ? null : other['id'] as String?;
@@ -728,8 +739,9 @@ class _ChatScreenState extends State<ChatScreen> {
         ? _Status.online
         : _Status.offline;
 
+    final convId = conv['id'] as String;
     return _Contact(
-      id:          conv['id'] as String,
+      id:          convId,
       name:        name,
       role:        subtitle,
       initials:    initials,
@@ -737,6 +749,7 @@ class _ChatScreenState extends State<ChatScreen> {
       status:      status,
       lastSeen:    '',
       preview:     preview,
+      unreadCount: _unreadByConv[convId] ?? 0,
     );
   }
 
@@ -765,6 +778,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isMobile = MediaQuery.of(context).size.width < 700;
+
+    if (isMobile) {
+      // On mobile: show contacts list OR chat panel — not both at once
+      final showChat = _selectedId.isNotEmpty;
+      if (showChat) {
+        return _buildRightPanel(showBack: true);
+      }
+      return _buildLeftPanel(fullWidth: true);
+    }
+
     return Row(
       children: [
         _buildLeftPanel(),
@@ -778,7 +802,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // LEFT PANEL — contact list
   // ────────────────────────────────────────────────────────────────────────────
 
-  Widget _buildLeftPanel() {
+  Widget _buildLeftPanel({bool fullWidth = false}) {
     final contacts = _conversations.map((c) => _contactFromConversation(c)).toList();
     final filtered = _search.isEmpty
         ? contacts
@@ -788,68 +812,68 @@ class _ChatScreenState extends State<ChatScreen> {
                 c.role.toLowerCase().contains(_search.toLowerCase()))
             .toList();
 
-    return SizedBox(
-      width: 300,
-      child: Column(
-        children: [
-          // ── Header ────────────────────────────────────────────────────────
-          Container(
-            padding: const EdgeInsets.fromLTRB(16, 16, 8, 8),
-            child: Row(
-              children: [
-                const Text('Chats',
-                    style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: _kPrimary)),
-                const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.edit_square, size: 18, color: _kPrimary),
-                  tooltip: 'New chat',
-                  onPressed: _showNewChatDialog,
-                  visualDensity: VisualDensity.compact,
-                ),
-              ],
-            ),
-          ),
-          // ── Search bar ────────────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-            child: Container(
-              decoration: BoxDecoration(
-                color: _kBg,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _kBorder),
+    final panel = Column(
+      children: [
+        // ── Header ────────────────────────────────────────────────────────
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 16, 8, 8),
+          child: Row(
+            children: [
+              const Text('Chats',
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: _kPrimary)),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.edit_square, size: 18, color: _kPrimary),
+                tooltip: 'New chat',
+                onPressed: _showNewChatDialog,
+                visualDensity: VisualDensity.compact,
               ),
-              child: TextField(
-                controller: _searchCtrl,
-                style: const TextStyle(fontSize: 13),
-                decoration: InputDecoration(
-                  hintText: 'Search...',
-                  hintStyle:
-                      TextStyle(fontSize: 13, color: Colors.grey[400]),
-                  prefixIcon: Icon(Icons.search, size: 18, color: Colors.grey[400]),
-                  border: InputBorder.none,
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                ),
+            ],
+          ),
+        ),
+        // ── Search bar ────────────────────────────────────────────────────
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+          child: Container(
+            decoration: BoxDecoration(
+              color: _kBg,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: _kBorder),
+            ),
+            child: TextField(
+              controller: _searchCtrl,
+              style: const TextStyle(fontSize: 13),
+              decoration: InputDecoration(
+                hintText: 'Search...',
+                hintStyle:
+                    TextStyle(fontSize: 13, color: Colors.grey[400]),
+                prefixIcon: Icon(Icons.search, size: 18, color: Colors.grey[400]),
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: 10),
               ),
             ),
           ),
-          // ── Contact rows ──────────────────────────────────────────────────
-          Expanded(
-            child: _loadingConversations
-                ? const Center(child: CircularProgressIndicator())
-                : filtered.isEmpty
-                    ? const Center(child: Text('No conversations', style: TextStyle(color: Colors.grey, fontSize: 13)))
-                    : ListView.builder(
-                        itemCount: filtered.length,
-                        itemBuilder: (_, i) => _buildContactRow(filtered[i]),
-                      ),
-          ),
-        ],
-      ),
+        ),
+        // ── Contact rows ──────────────────────────────────────────────────
+        Expanded(
+          child: _loadingConversations
+              ? const Center(child: CircularProgressIndicator())
+              : filtered.isEmpty
+                  ? const Center(child: Text('No conversations', style: TextStyle(color: Colors.grey, fontSize: 13)))
+                  : ListView.builder(
+                      itemCount: filtered.length,
+                      itemBuilder: (_, i) => _buildContactRow(filtered[i]),
+                    ),
+        ),
+      ],
     );
+
+    if (fullWidth) return panel;
+    return SizedBox(width: 300, child: panel);
   }
 
   Widget _buildContactRow(_Contact c) {
@@ -897,9 +921,23 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
-            // Timestamp — top-right aligned
-            Text(c.lastSeen,
-                style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+            // Unread badge or timestamp
+            if (c.unreadCount > 0)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _kAccent,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  c.unreadCount > 99 ? '99+' : '${c.unreadCount}',
+                  style: const TextStyle(
+                      fontSize: 10, fontWeight: FontWeight.w600, color: Colors.white),
+                ),
+              )
+            else
+              Text(c.lastSeen,
+                  style: TextStyle(fontSize: 10, color: Colors.grey[400])),
           ],
         ),
       ),
@@ -910,11 +948,11 @@ class _ChatScreenState extends State<ChatScreen> {
   // RIGHT PANEL — conversation
   // ────────────────────────────────────────────────────────────────────────────
 
-  Widget _buildRightPanel() {
+  Widget _buildRightPanel({bool showBack = false}) {
     final contact = _active;
     return Column(
       children: [
-        _buildTopBar(contact),
+        _buildTopBar(contact, showBack: showBack),
         Container(height: 1, color: _kBorder),
         Expanded(
           child: _loadingMessages
@@ -957,12 +995,22 @@ class _ChatScreenState extends State<ChatScreen> {
     return (conv['members'] as List?)?.cast<Map<String, dynamic>>() ?? [];
   }
 
-  // Top bar: avatar + name + status label + call / video / more icons
-  Widget _buildTopBar(_Contact c) {
+  // Top bar: avatar + name + status label + optional back button + call / video / more icons
+  Widget _buildTopBar(_Contact c, {bool showBack = false}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       child: Row(
         children: [
+          if (showBack) ...[
+            IconButton(
+              icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18),
+              onPressed: () => setState(() => _selectedId = ''),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              visualDensity: VisualDensity.compact,
+            ),
+            const SizedBox(width: 8),
+          ],
           Stack(
             children: [
               CircleAvatar(
@@ -1159,51 +1207,53 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             const SizedBox(width: 8),
           ],
-          Column(
-            crossAxisAlignment:
-                isSent ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-            children: [
-              // Sender name — shown in group chats for received messages
-              if (!isSent && _isGroupChat && msg.senderName != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 3),
-                  child: Text(msg.senderName!,
-                      style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: _avatarColor(msg.senderName!))),
-                ),
-              // Bubble — accent bg for sent, light gray for received
-              Container(
-                constraints: const BoxConstraints(maxWidth: 340),
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: isSent ? _kAccent : _kBg,
-                  borderRadius: BorderRadius.only(
-                    topLeft:     const Radius.circular(12),
-                    topRight:    const Radius.circular(12),
-                    bottomLeft:  Radius.circular(isSent ? 12 : 2),
-                    bottomRight: Radius.circular(isSent ? 2  : 12),
+          Flexible(
+            child: Column(
+              crossAxisAlignment:
+                  isSent ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              children: [
+                // Sender name — shown in group chats for received messages
+                if (!isSent && _isGroupChat && msg.senderName != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(msg.senderName!,
+                        style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: _avatarColor(msg.senderName!))),
                   ),
-                  border: isSent ? null : Border.all(color: _kBorder),
+                // Bubble — accent bg for sent, light gray for received
+                Container(
+                  constraints: const BoxConstraints(maxWidth: 340),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isSent ? _kAccent : _kBg,
+                    borderRadius: BorderRadius.only(
+                      topLeft:     const Radius.circular(12),
+                      topRight:    const Radius.circular(12),
+                      bottomLeft:  Radius.circular(isSent ? 12 : 2),
+                      bottomRight: Radius.circular(isSent ? 2  : 12),
+                    ),
+                    border: isSent ? null : Border.all(color: _kBorder),
+                  ),
+                  child: Text(msg.text ?? '',
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: isSent ? Colors.white : _kPrimary)),
                 ),
-                child: Text(msg.text ?? '',
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: isSent ? Colors.white : _kPrimary)),
-              ),
-              const SizedBox(height: 4),
-              // Timestamp
-              Text(
-                isSent
-                    ? msg.time
-                    : _isGroupChat
-                        ? msg.time
+                const SizedBox(height: 4),
+                // Timestamp
+                Text(
+                  isSent
+                      ? msg.time
+                      : _isGroupChat
+                          ? msg.time
                         : '${contact.name}, ${msg.time}',
-                style: TextStyle(fontSize: 10, color: Colors.grey[400]),
-              ),
-            ],
+                  style: TextStyle(fontSize: 10, color: Colors.grey[400]),
+                ),
+              ],
+            ),
           ),
           if (isSent) const SizedBox(width: 8),
         ],
@@ -1228,47 +1278,49 @@ class _ChatScreenState extends State<ChatScreen> {
                     fontWeight: FontWeight.bold)),
           ),
           const SizedBox(width: 8),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 220,
-                decoration: BoxDecoration(
-                  color: _kBg,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: _kBorder),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Image placeholder — a soft blue-gray rectangle mimicking
-                    // the mountain-fog photo in the reference screenshot.
-                    ClipRRect(
-                      borderRadius: const BorderRadius.vertical(
-                          top: Radius.circular(9)),
-                      child: Container(
-                        height: 130,
-                        color: const Color(0xFFB0C4DE),
-                        child: const Center(
-                          child: Icon(Icons.image_outlined,
-                              size: 40, color: Colors.white60),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  constraints: const BoxConstraints(maxWidth: 220),
+                  decoration: BoxDecoration(
+                    color: _kBg,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: _kBorder),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Image placeholder — a soft blue-gray rectangle mimicking
+                      // the mountain-fog photo in the reference screenshot.
+                      ClipRRect(
+                        borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(9)),
+                        child: Container(
+                          height: 130,
+                          color: const Color(0xFFB0C4DE),
+                          child: const Center(
+                            child: Icon(Icons.image_outlined,
+                                size: 40, color: Colors.white60),
+                          ),
                         ),
                       ),
-                    ),
-                    // Caption below the image
-                    Padding(
-                      padding: const EdgeInsets.all(10),
-                      child: Text(msg.imageCaption!,
-                          style: const TextStyle(
-                              fontSize: 12, color: _kPrimary)),
-                    ),
-                  ],
+                      // Caption below the image
+                      Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Text(msg.imageCaption!,
+                            style: const TextStyle(
+                                fontSize: 12, color: _kPrimary)),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text('${contact.name}, ${msg.time}',
-                  style: TextStyle(fontSize: 10, color: Colors.grey[400])),
-            ],
+                const SizedBox(height: 4),
+                Text('${contact.name}, ${msg.time}',
+                    style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+              ],
+            ),
           ),
         ],
       ),
@@ -1342,21 +1394,23 @@ class _ChatScreenState extends State<ChatScreen> {
                     color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
           ),
           const SizedBox(width: 8),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _ChatTaskCard(
-                task:          task,
-                onReject:      () => _reviewTaskFromChat(task, 'rejected'),
-                onComplete:    () => _reviewTaskFromChat(task, 'completed'),
-                onTap:         () => _showTaskPreview(context, task),
-                currentUserId: _myUserId,
-                onPauseReview: (reqId, status) => _reviewPauseFromChat(task, reqId, status),
-              ),
-              const SizedBox(height: 4),
-              Text('${contact.name}, ${msg.time}',
-                  style: TextStyle(fontSize: 10, color: Colors.grey[400])),
-            ],
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _ChatTaskCard(
+                  task:          task,
+                  onReject:      () => _reviewTaskFromChat(task, 'rejected'),
+                  onComplete:    () => _reviewTaskFromChat(task, 'completed'),
+                  onTap:         () => _showTaskPreview(context, task),
+                  currentUserId: _myUserId,
+                  onPauseReview: (reqId, status) => _reviewPauseFromChat(task, reqId, status),
+                ),
+                const SizedBox(height: 4),
+                Text('${contact.name}, ${msg.time}',
+                    style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+              ],
+            ),
           ),
         ],
       ),
@@ -1380,19 +1434,21 @@ class _ChatScreenState extends State<ChatScreen> {
                     color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
           ),
           const SizedBox(width: 8),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _PauseRequestCard(
-                pauseReq:  pr,
-                isReviewer: isReviewer,
-                onApprove: () => _reviewPauseReqCard(pr, 'approved'),
-                onDeny:    () => _reviewPauseReqCard(pr, 'denied'),
-              ),
-              const SizedBox(height: 4),
-              Text('${contact.name}, ${msg.time}',
-                  style: TextStyle(fontSize: 10, color: Colors.grey[400])),
-            ],
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _PauseRequestCard(
+                  pauseReq:  pr,
+                  isReviewer: isReviewer,
+                  onApprove: () => _reviewPauseReqCard(pr, 'approved'),
+                  onDeny:    () => _reviewPauseReqCard(pr, 'denied'),
+                ),
+                const SizedBox(height: 4),
+                Text('${contact.name}, ${msg.time}',
+                    style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+              ],
+            ),
           ),
         ],
       ),
@@ -1430,19 +1486,21 @@ class _ChatScreenState extends State<ChatScreen> {
                     color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
           ),
           const SizedBox(width: 8),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _IdeaRequestCard(
-                ideaReq:    ir,
-                isReviewer: isReviewer,
-                onApprove:  () => _reviewIdeaReqCard(ir, 'approved'),
-                onDeny:     () => _reviewIdeaReqCard(ir, 'denied'),
-              ),
-              const SizedBox(height: 4),
-              Text('${contact.name}, ${msg.time}',
-                  style: TextStyle(fontSize: 10, color: Colors.grey[400])),
-            ],
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _IdeaRequestCard(
+                  ideaReq:    ir,
+                  isReviewer: isReviewer,
+                  onApprove:  () => _reviewIdeaReqCard(ir, 'approved'),
+                  onDeny:     () => _reviewIdeaReqCard(ir, 'denied'),
+                ),
+                const SizedBox(height: 4),
+                Text('${contact.name}, ${msg.time}',
+                    style: TextStyle(fontSize: 10, color: Colors.grey[400])),
+              ],
+            ),
           ),
         ],
       ),
@@ -1846,7 +1904,7 @@ class _ChatTaskCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-      width: 320,
+      constraints: const BoxConstraints(maxWidth: 320),
       decoration: BoxDecoration(
         color:        Colors.white,
         borderRadius: BorderRadius.circular(8),
@@ -1950,48 +2008,84 @@ class _ChatTaskCard extends StatelessWidget {
                 const SizedBox(height: 10),
 
                 // Assignee + reviewer
-                Row(children: [
-                  if (task.assignee.isNotEmpty) ...[
-                    CircleAvatar(
-                      radius:          10,
-                      backgroundColor: Color(0xFF6366F1 + (task.assignee.hashCode & 0x00FFFFFF)),
-                      child: Text(task.assignee[0].toUpperCase(),
-                          style: const TextStyle(fontSize: 9, color: Colors.white,
-                              fontWeight: FontWeight.w600)),
-                    ),
-                    const SizedBox(width: 5),
-                    Text(task.assignee,
-                        style: const TextStyle(fontSize: 11, color: _kMuted)),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (task.assignee.isNotEmpty) ...[
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CircleAvatar(
+                            radius:          10,
+                            backgroundColor: Color(0xFF6366F1 + (task.assignee.hashCode & 0x00FFFFFF)),
+                            child: Text(task.assignee[0].toUpperCase(),
+                                style: const TextStyle(fontSize: 9, color: Colors.white,
+                                    fontWeight: FontWeight.w600)),
+                          ),
+                          const SizedBox(width: 5),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 120),
+                            child: Text(task.assignee,
+                                style: const TextStyle(fontSize: 11, color: _kMuted),
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (task.reviewerName.isNotEmpty) ...[
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.shield_outlined, size: 11, color: _kMuted),
+                          const SizedBox(width: 3),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 120),
+                            child: Text(task.reviewerName,
+                                style: const TextStyle(fontSize: 11, color: _kMuted),
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                        ],
+                      ),
+                    ],
                   ],
-                  if (task.reviewerName.isNotEmpty) ...[
-                    const SizedBox(width: 8),
-                    const Icon(Icons.shield_outlined, size: 11, color: _kMuted),
-                    const SizedBox(width: 3),
-                    Text(task.reviewerName,
-                        style: const TextStyle(fontSize: 11, color: _kMuted)),
-                  ],
-                ]),
+                ),
                 const SizedBox(height: 6),
                 // Date + end_date + comment count
-                Row(children: [
-                  if (task.date.isNotEmpty) ...[
-                    Icon(Icons.calendar_today_outlined, size: 11, color: _kMuted),
-                    const SizedBox(width: 3),
-                    Text(
-                      task.endDate != null
-                          ? '${task.date} → ${task.endDate}'
-                          : task.date,
-                      style: const TextStyle(fontSize: 10, color: _kMuted),
-                    ),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (task.date.isNotEmpty) ...[
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.calendar_today_outlined, size: 11, color: _kMuted),
+                          const SizedBox(width: 3),
+                          Text(
+                            task.endDate != null
+                                ? '${task.date} → ${task.endDate}'
+                                : task.date,
+                            style: const TextStyle(fontSize: 10, color: _kMuted),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (task.commentCount > 0) ...[
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.chat_bubble_outline_rounded, size: 11, color: _kMuted),
+                          const SizedBox(width: 3),
+                          Text('${task.commentCount}',
+                              style: const TextStyle(fontSize: 10, color: _kMuted)),
+                        ],
+                      ),
+                    ],
                   ],
-                  const Spacer(),
-                  if (task.commentCount > 0) ...[
-                    Icon(Icons.chat_bubble_outline_rounded, size: 11, color: _kMuted),
-                    const SizedBox(width: 3),
-                    Text('${task.commentCount}',
-                        style: const TextStyle(fontSize: 10, color: _kMuted)),
-                  ],
-                ]),
+                ),
               ],
             ),
           ),
@@ -2011,10 +2105,14 @@ class _ChatTaskCard extends StatelessWidget {
                     const Icon(Icons.pause_circle_outline_rounded,
                         size: 12, color: Color(0xFFF59E0B)),
                     const SizedBox(width: 6),
-                    Text(
-                      'Pause requested — ${task.pendingPauseRequest!['reason'] ?? ''}',
-                      style: const TextStyle(fontSize: 11, color: Color(0xFFF59E0B),
-                          fontWeight: FontWeight.w600),
+                    Expanded(
+                      child: Text(
+                        'Pause requested — ${task.pendingPauseRequest!['reason'] ?? ''}',
+                        style: const TextStyle(fontSize: 11, color: Color(0xFFF59E0B),
+                            fontWeight: FontWeight.w600),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ]),
                   if ((task.pendingPauseRequest!['note'] as String?)?.isNotEmpty == true) ...[
@@ -2072,8 +2170,8 @@ class _ChatTaskCard extends StatelessWidget {
             ),
           ],
 
-          // ── Action buttons (only when pending) ──────────────────────────
-          if (isPending) ...[
+          // ── Action buttons (only reviewer can approve/reject) ─────────────
+          if (isPending && currentUserId != null && task.reviewerId == currentUserId) ...[
             const Divider(height: 1, color: _kBorder),
             Padding(
               padding: const EdgeInsets.all(10),
@@ -2171,7 +2269,7 @@ class _PauseRequestCard extends StatelessWidget {
             : const Color(0xFFF59E0B);
 
     return Container(
-      width: 320,
+      constraints: const BoxConstraints(maxWidth: 320),
       decoration: BoxDecoration(
         color:        Colors.white,
         borderRadius: BorderRadius.circular(8),
@@ -2225,22 +2323,30 @@ class _PauseRequestCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(pauseReq.taskTitle,
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary)),
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary),
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 2),
                 const SizedBox(height: 6),
                 Row(children: [
                   const Icon(Icons.label_outline_rounded, size: 12, color: _kMuted),
                   const SizedBox(width: 4),
-                  Text('Reason: ${pauseReq.reason}',
-                      style: const TextStyle(fontSize: 12, color: _kMuted)),
+                  Expanded(
+                    child: Text('Reason: ${pauseReq.reason}',
+                        style: const TextStyle(fontSize: 12, color: _kMuted),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis),
+                  ),
                 ]),
                 if (pauseReq.note != null && pauseReq.note!.isNotEmpty) ...[
                   const SizedBox(height: 4),
                   Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     const Icon(Icons.notes_rounded, size: 12, color: _kMuted),
                     const SizedBox(width: 4),
-                    Flexible(
+                    Expanded(
                       child: Text(pauseReq.note!,
-                          style: const TextStyle(fontSize: 12, color: _kMuted)),
+                          style: const TextStyle(fontSize: 12, color: _kMuted),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis),
                     ),
                   ]),
                 ],
@@ -2344,7 +2450,7 @@ class _IdeaRequestCard extends StatelessWidget {
             : accentColor;
 
     return Container(
-      width: 320,
+      constraints: const BoxConstraints(maxWidth: 320),
       decoration: BoxDecoration(
         color:        Colors.white,
         borderRadius: BorderRadius.circular(8),
@@ -2398,14 +2504,18 @@ class _IdeaRequestCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(ideaReq.taskTitle,
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary)),
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kPrimary),
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 2),
                 const SizedBox(height: 6),
                 Row(children: [
                   const Icon(Icons.notes_rounded, size: 12, color: _kMuted),
                   const SizedBox(width: 4),
-                  Flexible(
+                  Expanded(
                     child: Text(ideaReq.reason,
-                        style: const TextStyle(fontSize: 12, color: _kMuted)),
+                        style: const TextStyle(fontSize: 12, color: _kMuted),
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis),
                   ),
                 ]),
               ],

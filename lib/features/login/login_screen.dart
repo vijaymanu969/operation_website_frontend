@@ -35,14 +35,24 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 480;
+    final outerPadding = isMobile ? 16.0 : 32.0;
+    final innerPadding = isMobile ? 24.0 : 40.0;
+    final logoFontSize = isMobile ? 22.0 : 28.0;
+
     return Scaffold(
       backgroundColor: AppColors.primary,
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(32),
+          padding: EdgeInsets.symmetric(
+            horizontal: outerPadding,
+            vertical: outerPadding,
+          ),
           child: Container(
-            constraints: const BoxConstraints(maxWidth: 400),
-            padding: const EdgeInsets.all(40),
+            constraints: const BoxConstraints(maxWidth: 420),
+            width: double.infinity,
+            padding: EdgeInsets.all(innerPadding),
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(16),
@@ -59,11 +69,11 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text(
+                  Text(
                     'CELUME OPS',
                     style: TextStyle(
                       color: AppColors.primary,
-                      fontSize: 28,
+                      fontSize: logoFontSize,
                       fontWeight: FontWeight.bold,
                       letterSpacing: 3,
                     ),
@@ -73,10 +83,10 @@ class _LoginScreenState extends State<LoginScreen> {
                     'Operations Dashboard',
                     style: TextStyle(
                       color: Colors.grey[600],
-                      fontSize: 14,
+                      fontSize: isMobile ? 12 : 14,
                     ),
                   ),
-                  const SizedBox(height: 40),
+                  SizedBox(height: isMobile ? 28 : 40),
                   TextFormField(
                     controller: _emailController,
                     decoration: InputDecoration(
@@ -99,7 +109,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     },
                     onFieldSubmitted: (_) => _onSubmit(),
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 16),
                   TextFormField(
                     controller: _passwordController,
                     decoration: InputDecoration(
@@ -122,7 +132,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     },
                     onFieldSubmitted: (_) => _onSubmit(),
                   ),
-                  const SizedBox(height: 32),
+                  SizedBox(height: isMobile ? 24 : 32),
                   BlocConsumer<AuthBloc, AuthState>(
                     listener: (context, state) {
                       if (state is AuthFailure) {

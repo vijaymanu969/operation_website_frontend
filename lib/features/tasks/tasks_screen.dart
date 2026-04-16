@@ -704,7 +704,10 @@ class _TasksScreenState extends State<TasksScreen> {
               Expanded(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  child: AppFlowyBoard(
+                  child: Scrollbar(
+                    thumbVisibility: true,
+                    notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
+                    child: AppFlowyBoard(
                     controller:             _boardCtrl,
                     boardScrollController:  _scrollCtrl,
                     cardBuilder: (context, group, groupItem) {
@@ -769,6 +772,7 @@ class _TasksScreenState extends State<TasksScreen> {
                       stretchGroupHeight:  false,
                       groupMargin:         const EdgeInsets.only(right: 14),
                     ),
+                  ),
                   ),
                 ),
               ),

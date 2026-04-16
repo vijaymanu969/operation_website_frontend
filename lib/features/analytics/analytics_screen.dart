@@ -212,42 +212,58 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
       );
     }
 
+    final isMobile = MediaQuery.of(context).size.width < 700;
+    final pad = isMobile ? 16.0 : 24.0;
+
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.all(pad),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Analytics', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+          Text('Analytics',
+              style: TextStyle(
+                  fontSize: isMobile ? 20 : 24,
+                  fontWeight: FontWeight.bold)),
           const SizedBox(height: 24),
 
-          // ── Stat cards row ──────────────────────────────────────────────
+          // ── Stat cards ──────────────────────────────────────────────────
           _buildStatCards(),
           const SizedBox(height: 24),
 
-          // ── Charts row ──────────────────────────────────────────────────
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(child: _buildTasksByStatusChart()),
-              const SizedBox(width: 24),
-              Expanded(child: _buildTasksByPriorityChart()),
-            ],
-          ),
+          // ── Charts — stack vertically on mobile ─────────────────────────
+          if (isMobile) ...[  
+            _buildTasksByStatusChart(),
+            const SizedBox(height: 16),
+            _buildTasksByPriorityChart(),
+          ] else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildTasksByStatusChart()),
+                const SizedBox(width: 24),
+                Expanded(child: _buildTasksByPriorityChart()),
+              ],
+            ),
           const SizedBox(height: 24),
 
           // ── Tasks per person ─────────────────────────────────────────────
           _buildTasksPerPersonChart(),
           const SizedBox(height: 24),
 
-          // ── Stagnant & Attendance overview ───────────────────────────────
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(child: _buildStagnantCard()),
-              const SizedBox(width: 24),
-              Expanded(child: _buildAttendanceOverview()),
-            ],
-          ),
+          // ── Stagnant & Attendance — stack vertically on mobile ───────────
+          if (isMobile) ...[  
+            _buildStagnantCard(),
+            const SizedBox(height: 16),
+            _buildAttendanceOverview(),
+          ] else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildStagnantCard()),
+                const SizedBox(width: 24),
+                Expanded(child: _buildAttendanceOverview()),
+              ],
+            ),
           const SizedBox(height: 32),
 
           // ── Attendance per person ─────────────────────────────────────────
@@ -702,28 +718,32 @@ class _StatCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 160,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 2))],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 8, height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(height: 8),
-          Text(value, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 4),
-          Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
-        ],
-      ),
-    );
+    return LayoutBuilder(builder: (context, constraints) {
+      // Fill width if inside a Wrap where each child gets plenty of space,
+      // otherwise cap at 160. minWidth 130 keeps it readable.
+      return Container(
+        constraints: const BoxConstraints(minWidth: 130),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 2))],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 8, height: 8,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            ),
+            const SizedBox(height: 8),
+            Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+          ],
+        ),
+      );
+    });
   }
 }
 
@@ -832,12 +852,15 @@ class _UserPerfCardState extends State<_UserPerfCard>
         .map((w) => w.isEmpty ? '' : w[0].toUpperCase())
         .join();
 
+    final screenWidth = MediaQuery.of(context).size.width;
+    final cardWidth = screenWidth < 700 ? double.infinity : 290.0;
+
     return FadeTransition(
       opacity: _fade,
       child: SlideTransition(
         position: _slide,
         child: Container(
-          width: 290,
+          width: cardWidth,
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(16),
