@@ -205,7 +205,13 @@ class TaskItem extends AppFlowyGroupItem {
 
   static DateTime? _parseDate(dynamic d) {
     if (d == null) return null;
-    return DateTime.tryParse(d.toString());
+    final parsed = DateTime.tryParse(d.toString());
+    if (parsed == null) return null;
+    // Convert UTC timestamps to local time before stripping the time component.
+    // Without this, "2026-04-28T18:30:00Z" (= Apr 29 midnight IST) would display
+    // as Apr 28 because .day on a UTC DateTime returns the UTC calendar day.
+    final local = parsed.toLocal();
+    return DateTime(local.year, local.month, local.day);
   }
 
   /// Map column_group from backend to board group ID
@@ -235,6 +241,9 @@ class _TasksScreenState extends State<TasksScreen> {
   late final AppFlowyBoardController       _boardCtrl;
   late final AppFlowyBoardScrollController _scrollCtrl;
   TaskItem? _selectedTask;
+  // Buffers socket task:updated events that arrive while the detail modal is open.
+  // Flushed to the board when the modal closes.
+  final Map<String, Map<String, dynamic>> _pendingTaskUpdates = {};
   bool _loadingTasks = true;
 
   // Users loaded from API (for assignee / reviewer dropdowns in new task dialog)
@@ -593,6 +602,12 @@ class _TasksScreenState extends State<TasksScreen> {
     final taskJson = data['task'] as Map<String, dynamic>?;
     if (taskJson == null || !mounted) return;
     final task = TaskItem.fromJson(taskJson);
+    // If the detail modal for this task is currently open, buffer the update
+    // and apply it once the modal closes instead of updating mid-view.
+    if (_selectedTask != null && _selectedTask!.id == task.id) {
+      _pendingTaskUpdates[task.id] = taskJson;
+      return;
+    }
     _removeTaskFromBoard(task.id);
     _boardCtrl.addGroupItem(_groupForTask(task), task);
     if (mounted) setState(() {});
@@ -879,7 +894,17 @@ class _TasksScreenState extends State<TasksScreen> {
           ),
         ],
       ),
-    ).then((_) => setState(() => _selectedTask = null));
+    ).then((_) {
+      final closedId = _selectedTask?.id;
+      setState(() => _selectedTask = null);
+      // If any socket updates arrived while the modal was open, discard the
+      // buffered JSON and do one fresh fetch instead — avoids applying the
+      // same change twice (onChanged already mutated the item in-place).
+      if (closedId != null && _pendingTaskUpdates.containsKey(closedId)) {
+        _pendingTaskUpdates.remove(closedId);
+        _loadTasks();
+      }
+    });
   }
 
   // ── Add task dialog ─────────────────────────────────────────────────────────
@@ -2240,6 +2265,11 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   final _dateRowKey       = GlobalKey();
   OverlayEntry? _dateOverlay;
   late bool _endDateEnabled = widget.item.endDate != null;
+  // Snapshot of date values taken when the picker opens — used to skip the
+  // save if the user closes without actually changing anything.
+  DateTime? _pickerOpenDate;
+  DateTime? _pickerOpenEndDate;
+  bool _dateDirty = false;
   Timer? _debounce;
 
   late final List<SelectOption> _typeOpts = List<SelectOption>.from(widget.typeOptions);
@@ -2814,6 +2844,9 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   void _openDateOverlay() {
     final item = widget.item;
     if (_dateOverlay != null) { _closeDateOverlay(); return; }
+    // Snapshot the current dates so we can skip the save if nothing changes.
+    _pickerOpenDate    = item.date;
+    _pickerOpenEndDate = item.endDate;
     final rb = _dateRowKey.currentContext?.findRenderObject() as RenderBox?;
     if (rb == null) return;
     final pos  = rb.localToGlobal(Offset.zero);
@@ -2827,19 +2860,17 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       endDateEnabled: _endDateEnabled,
       onClose:        _closeDateOverlay,
       onSelect: (d) {
-        setState(() { item.date = d; item.endDate = null; });
+        setState(() { item.date = d; item.endDate = null; _dateDirty = true; });
         widget.onChanged();
         _dateOverlay?.markNeedsBuild();
-        _saveField({'date': d.toIso8601String().substring(0, 10), 'end_date': null});
       },
       onEndSelect: (d) {
-        setState(() => item.endDate = d);
+        setState(() { item.endDate = d; _dateDirty = true; });
         widget.onChanged();
         _dateOverlay?.markNeedsBuild();
-        _saveField({'end_date': d.toIso8601String().substring(0, 10)});
       },
       onEndDateToggle: (v) {
-        setState(() { _endDateEnabled = v; if (!v) item.endDate = null; });
+        setState(() { _endDateEnabled = v; if (!v) item.endDate = null; _dateDirty = true; });
         _dateOverlay?.markNeedsBuild();
       },
     ));
@@ -2851,6 +2882,23 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     _dateOverlay?.remove();
     _dateOverlay?.dispose();
     _dateOverlay = null;
+    // Save exactly once when the picker closes — covers both explicit close
+    // (tap outside / X) and modal dismiss (dispose → _closeDateOverlay).
+    if (_dateDirty) {
+      _dateDirty = false;
+      final item = widget.item;
+      final dateChanged   = item.date    != _pickerOpenDate;
+      final endDateChanged = item.endDate != _pickerOpenEndDate;
+      if (dateChanged || endDateChanged) {
+        final id = item.backendId;
+        if (id != null) {
+          context.read<ApiClient>().updateTask(id, {
+            'date':     item.date?.toIso8601String().substring(0, 10),
+            'end_date': item.endDate?.toIso8601String().substring(0, 10),
+          });
+        }
+      }
+    }
     if (mounted) setState(() {});
   }
 
@@ -2984,7 +3032,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                       ]),
                     )).toList(),
                     onChanged: (v) {
-                      if (v != null) {
+                      if (v != null && v != item.priority) {
                         setState(() => item.priority = v);
                         widget.onChanged();
                         _saveField({'priority': v.apiValue});
