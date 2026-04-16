@@ -11,12 +11,21 @@ class SocketService {
   final _notificationCtrl  = StreamController<Map<String, dynamic>>.broadcast();
   final _unreadCountCtrl   = StreamController<int>.broadcast();
   final _onlineUsersCtrl   = StreamController<Set<String>>.broadcast();
+  // Task board events
+  final _taskCreatedCtrl       = StreamController<Map<String, dynamic>>.broadcast();
+  final _taskUpdatedCtrl       = StreamController<Map<String, dynamic>>.broadcast();
+  final _taskDeletedCtrl       = StreamController<Map<String, dynamic>>.broadcast();
+  final _taskStatusChangedCtrl = StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<Map<String, dynamic>> get onNewMessage    => _newMessageCtrl.stream;
   Stream<Map<String, dynamic>> get onReviewUpdated => _reviewUpdatedCtrl.stream;
   Stream<Map<String, dynamic>> get onNotification  => _notificationCtrl.stream;
   Stream<int>                  get onUnreadCount   => _unreadCountCtrl.stream;
   Stream<Set<String>>          get onOnlineUsers   => _onlineUsersCtrl.stream;
+  Stream<Map<String, dynamic>> get onTaskCreated       => _taskCreatedCtrl.stream;
+  Stream<Map<String, dynamic>> get onTaskUpdated       => _taskUpdatedCtrl.stream;
+  Stream<Map<String, dynamic>> get onTaskDeleted       => _taskDeletedCtrl.stream;
+  Stream<Map<String, dynamic>> get onTaskStatusChanged => _taskStatusChangedCtrl.stream;
 
   int          _unreadCount = 0;
   int          get unreadCount  => _unreadCount;
@@ -92,6 +101,18 @@ class SocketService {
             _onlineUsersCtrl.add(Set.unmodifiable(_onlineUsers));
           }
         }
+      })
+      ..on('task_created', (data) {
+        if (data is Map) _taskCreatedCtrl.add(Map<String, dynamic>.from(data));
+      })
+      ..on('task_updated', (data) {
+        if (data is Map) _taskUpdatedCtrl.add(Map<String, dynamic>.from(data));
+      })
+      ..on('task_deleted', (data) {
+        if (data is Map) _taskDeletedCtrl.add(Map<String, dynamic>.from(data));
+      })
+      ..on('task_status_changed', (data) {
+        if (data is Map) _taskStatusChangedCtrl.add(Map<String, dynamic>.from(data));
       });
 
     _socket!.connect();
@@ -127,5 +148,9 @@ class SocketService {
     _notificationCtrl.close();
     _unreadCountCtrl.close();
     _onlineUsersCtrl.close();
+    _taskCreatedCtrl.close();
+    _taskUpdatedCtrl.close();
+    _taskDeletedCtrl.close();
+    _taskStatusChangedCtrl.close();
   }
 }

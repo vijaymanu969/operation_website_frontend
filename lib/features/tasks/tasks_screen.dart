@@ -370,7 +370,10 @@ class _TasksScreenState extends State<TasksScreen> {
   ApiClient     get _api    => context.read<ApiClient>();
   SocketService get _socket => context.read<SocketService>();
 
-  StreamSubscription<Map<String, dynamic>>? _notifSub;
+  StreamSubscription<Map<String, dynamic>>? _taskCreatedSub;
+  StreamSubscription<Map<String, dynamic>>? _taskUpdatedSub;
+  StreamSubscription<Map<String, dynamic>>? _taskDeletedSub;
+  StreamSubscription<Map<String, dynamic>>? _taskStatusSub;
 
   @override
   void initState() {
@@ -386,7 +389,10 @@ class _TasksScreenState extends State<TasksScreen> {
     _loadTasks();
     _loadTaskTypes();
     _loadUsers();
-    _notifSub = _socket.onNotification.listen((_) => _loadTasks());
+    _taskCreatedSub = _socket.onTaskCreated.listen(_onTaskCreated);
+    _taskUpdatedSub = _socket.onTaskUpdated.listen(_onTaskUpdated);
+    _taskDeletedSub = _socket.onTaskDeleted.listen(_onTaskDeleted);
+    _taskStatusSub  = _socket.onTaskStatusChanged.listen(_onTaskUpdated);
 
     // Workers / interns always see their own analytics panel on the right.
     if (!_isAdminUser(context)) _loadMyProfile();
@@ -539,9 +545,64 @@ class _TasksScreenState extends State<TasksScreen> {
 
   @override
   void dispose() {
-    _notifSub?.cancel();
+    _taskCreatedSub?.cancel();
+    _taskUpdatedSub?.cancel();
+    _taskDeletedSub?.cancel();
+    _taskStatusSub?.cancel();
     _boardCtrl.dispose();
     super.dispose();
+  }
+
+  // ── Surgical real-time board updates ──────────────────────────────────────
+
+  /// Determine which board column a task belongs to.
+  String _groupForTask(TaskItem task) {
+    final today = DateTime.now();
+    if (task.status == 'idea' || task.status == 'archived') return 'idea';
+    if (task.status == 'completed') return 'done';
+    if (task.date != null &&
+        !task.date!.isAfter(DateTime(today.year, today.month, today.day))) {
+      return 'in_progress';
+    }
+    return TaskItem.columnToGroup(task.columnGroup);
+  }
+
+  /// Remove a task from whatever column it's currently in.
+  void _removeTaskFromBoard(String taskId) {
+    for (final group in _boardCtrl.groupDatas) {
+      for (final item in group.items) {
+        if ((item as TaskItem).backendId == taskId) {
+          _boardCtrl.removeGroupItem(group.id, item.id);
+          return;
+        }
+      }
+    }
+  }
+
+  void _onTaskCreated(Map<String, dynamic> data) {
+    final taskJson = data['task'] as Map<String, dynamic>?;
+    if (taskJson == null || !mounted) return;
+    final task = TaskItem.fromJson(taskJson);
+    // Avoid duplicates (we may have just created it locally)
+    _removeTaskFromBoard(task.id);
+    _boardCtrl.addGroupItem(_groupForTask(task), task);
+    if (mounted) setState(() {});
+  }
+
+  void _onTaskUpdated(Map<String, dynamic> data) {
+    final taskJson = data['task'] as Map<String, dynamic>?;
+    if (taskJson == null || !mounted) return;
+    final task = TaskItem.fromJson(taskJson);
+    _removeTaskFromBoard(task.id);
+    _boardCtrl.addGroupItem(_groupForTask(task), task);
+    if (mounted) setState(() {});
+  }
+
+  void _onTaskDeleted(Map<String, dynamic> data) {
+    final taskId = data['task_id'] as String?;
+    if (taskId == null || !mounted) return;
+    _removeTaskFromBoard(taskId);
+    if (mounted) setState(() {});
   }
 
   Color _columnColor(String id) => switch (id) {
@@ -701,7 +762,7 @@ class _TasksScreenState extends State<TasksScreen> {
                       accentColor: _columnColor(groupData.id),
                     ),
                     footerBuilder: (_, _) => const SizedBox.shrink(),
-                    groupConstraints: const BoxConstraints.tightFor(width: 272),
+                    groupConstraints: const BoxConstraints.tightFor(width: 300),
                     config: AppFlowyBoardConfig(
                       // Column bg slightly off-white so cards (pure white) pop
                       groupBackgroundColor: _kBg,
@@ -1014,7 +1075,7 @@ class _TasksScreenState extends State<TasksScreen> {
                           if (selectedPersonIds.contains(id)) {
                             selectedPersonIds.remove(id);
                           } else {
-                            selectedPersonIds..clear()..add(id);
+                            selectedPersonIds.add(id);
                           }
                         });
                       },
@@ -1041,7 +1102,7 @@ class _TasksScreenState extends State<TasksScreen> {
                           if (selectedReviewerIds.contains(id)) {
                             selectedReviewerIds.remove(id);
                           } else {
-                            selectedReviewerIds..clear()..add(id);
+                            selectedReviewerIds.add(id);
                           }
                         });
                       },
@@ -1089,9 +1150,7 @@ class _TasksScreenState extends State<TasksScreen> {
                           if (selectedTypeIds.contains(id)) {
                             selectedTypeIds.remove(id);
                           } else {
-                            selectedTypeIds
-                              ..clear()
-                              ..add(id);
+                            selectedTypeIds.add(id);
                           }
                           final opt = dialogTypeOpts.firstWhere(
                               (o) => o.id == id,
@@ -1117,7 +1176,7 @@ class _TasksScreenState extends State<TasksScreen> {
                           );
                           setDlg(() {
                             dialogTypeOpts.add(newOpt);
-                            selectedTypeIds..clear()..add(newId);
+                            selectedTypeIds.add(newId);
                             selectedType = newOpt.name;
                           });
                           // Keep parent list in sync so next "New Task" shows it
@@ -1296,10 +1355,10 @@ class _TasksScreenState extends State<TasksScreen> {
             data['type_ids'] = selectedTypeIds;
           }
           if (selectedPersonIds.isNotEmpty) {
-            data['person_id'] = selectedPersonIds.first;
+            data['person_ids'] = selectedPersonIds;
           }
           if (selectedReviewerIds.isNotEmpty) {
-            data['reviewer_id'] = selectedReviewerIds.first;
+            data['reviewer_ids'] = selectedReviewerIds;
           }
           await _api.createTask(data);
           await _loadTasks();
@@ -1994,61 +2053,67 @@ class _TaskCard extends StatelessWidget {
             const SizedBox(height: 10),
             const Divider(height: 1, color: _kBorder),
             const SizedBox(height: 10),
-            // ── Row 4: assignee + reviewer + meta chips ───────────────────
-            Row(
-              children: [
-                if (item.assigneeNames.isNotEmpty) ...[
-                  _AssigneeAvatar(item.assigneeNames.first),
-                  const SizedBox(width: 5),
-                  Flexible(
-                    child: Text(
-                      item.assigneeNames.first,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: _kMuted),
-                    ),
+            // ── Assignees row ─────────────────────────────────────────────
+            if (item.assigneeNames.isNotEmpty)
+              Row(children: [
+                const Icon(Icons.person_outline_rounded, size: 12, color: _kMuted),
+                const SizedBox(width: 5),
+                ...item.assigneeNames.take(4).expand((name) => [
+                  _AssigneeAvatar(name, radius: 10),
+                  const SizedBox(width: 4),
+                ]),
+                Flexible(
+                  child: Text(
+                    item.assigneeNames.join(', '),
+                    style: const TextStyle(fontSize: 11, color: _kMuted),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  if (item.assigneeNames.length > 1) ...[
-                    const SizedBox(width: 3),
-                    Text('+${item.assigneeNames.length - 1}',
-                        style: const TextStyle(
-                            fontSize: 10,
-                            color: _kMuted,
-                            fontWeight: FontWeight.w600)),
-                  ],
-                ],
-                if (item.reviewerNames.isNotEmpty) ...[
-                  const SizedBox(width: 8),
-                  const Icon(Icons.shield_outlined, size: 11, color: _kMuted),
+                ),
+              ]),
+
+            // ── Reviewers row ────────────────────────────────────────────
+            if (item.reviewerNames.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Row(children: [
+                const Icon(Icons.shield_outlined, size: 12, color: _kMuted),
+                const SizedBox(width: 5),
+                ...item.reviewerNames.take(4).expand((name) => [
+                  _AssigneeAvatar(name, radius: 10),
+                  const SizedBox(width: 4),
+                ]),
+                Flexible(
+                  child: Text(
+                    item.reviewerNames.join(', '),
+                    style: const TextStyle(fontSize: 11, color: _kMuted),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ]),
+            ],
+
+            // ── Dates + comments row ─────────────────────────────────────
+            const SizedBox(height: 6),
+            Row(children: [
+              if (item.date != null) _DeadlineChip(item: item),
+              if (item.date != null && item.endDate != null) ...[
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4),
+                  child: Text('–', style: TextStyle(fontSize: 10, color: _kMuted)),
+                ),
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.calendar_today_outlined, size: 11, color: _kMuted),
                   const SizedBox(width: 3),
-                  Flexible(
-                    child: Text(
-                      item.reviewerNames.first,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: _kMuted),
-                    ),
-                  ),
-                  if (item.reviewerNames.length > 1) ...[
-                    const SizedBox(width: 3),
-                    Text('+${item.reviewerNames.length - 1}',
-                        style: const TextStyle(
-                            fontSize: 10,
-                            color: _kMuted,
-                            fontWeight: FontWeight.w600)),
-                  ],
-                ],
-                const SizedBox(width: 8),
-                const Spacer(),
-                if (item.comments.isNotEmpty) ...[
-                  _MetaChip(
-                    icon: Icons.chat_bubble_outline_rounded,
-                    text: '${item.comments.length}',
-                  ),
-                  const SizedBox(width: 8),
-                ],
-                if (item.date != null)
-                  _DeadlineChip(item: item),
+                  Text(_fmtDate(item.endDate!),
+                      style: const TextStyle(fontSize: 11, color: _kMuted)),
+                ]),
               ],
-            ),
+              const Spacer(),
+              if (item.comments.isNotEmpty)
+                _MetaChip(
+                  icon: Icons.chat_bubble_outline_rounded,
+                  text: '${item.comments.length}',
+                ),
+            ]),
           ],
         ),
       ),
