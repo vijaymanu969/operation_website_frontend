@@ -826,6 +826,95 @@ class _TasksScreenState extends State<TasksScreen> {
     );
   }
 
+  Widget _buildStaticBoard() {
+    const colW = 280.0;
+    final groups = _boardCtrl.groupDatas;
+    return ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(
+        dragDevices: {
+          PointerDeviceKind.touch,
+          PointerDeviceKind.mouse,
+          PointerDeviceKind.trackpad,
+        },
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SizedBox(
+          height: double.infinity,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: groups.map((group) {
+              final accentColor = _columnColor(group.id);
+              return Container(
+                width: colW,
+                margin: const EdgeInsets.only(right: 14),
+                decoration: BoxDecoration(
+                  color: _kBg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.max,
+                  children: [
+                    // Column accent stripe
+                    Container(
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: accentColor,
+                        borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                      ),
+                    ),
+                    // Column header
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      child: Row(children: [
+                        Text(group.headerData.groupName,
+                            style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: _kPrimary)),
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: accentColor.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text('${group.items.length}',
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: accentColor)),
+                        ),
+                      ]),
+                    ),
+                    // Cards — vertically scrollable
+                    Expanded(
+                      child: ListView.builder(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        itemCount: group.items.length,
+                        itemBuilder: (_, i) {
+                          final item   = group.items[i] as TaskItem;
+                          final cardId = item.backendId ?? item.id;
+                          return _TaskCard(
+                            item:        item,
+                            isSelected:  _selectedTask?.id == item.id,
+                            isPinned:    _pinnedIds.contains(cardId),
+                            onTap:       () => _showTaskDetailModal(item),
+                            onPinToggle: () => _togglePin(cardId),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildBoardArea(BuildContext context) {
     if (_loadingTasks) return const Center(child: CircularProgressIndicator());
 
@@ -836,7 +925,7 @@ class _TasksScreenState extends State<TasksScreen> {
     // Board widget — shared between mobile and desktop
     final board = Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      child: _buildKanbanBoard(),
+      child: isMobile ? _buildStaticBoard() : _buildKanbanBoard(),
     );
 
     // Profile panel widget — shared between mobile and desktop
