@@ -306,6 +306,7 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   String _selectedId = '';
+  bool   _isMobile   = false; // updated each build, used in _loadConversations
 
   final _msgCtrl    = TextEditingController();
   final _searchCtrl = TextEditingController();
@@ -543,7 +544,10 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final res = await _api.getConversations(search: _search.isEmpty ? null : _search);
       _conversations = (res.data as List).cast<Map<String, dynamic>>();
-      if (_conversations.isNotEmpty && _selectedId.isEmpty) {
+      // Auto-select first conversation on desktop only.
+      // On mobile we show the contacts list first (WhatsApp-style).
+      // _isMobile is set each build — no BuildContext needed across the async gap.
+      if (!_isMobile && _conversations.isNotEmpty && _selectedId.isEmpty) {
         _selectConversation(_conversations.first['id'] as String);
       }
     } catch (_) {
@@ -778,14 +782,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isMobile = MediaQuery.of(context).size.width < 700;
+    _isMobile = MediaQuery.of(context).size.width < 700;
 
-    if (isMobile) {
+    if (_isMobile) {
       // On mobile: show contacts list OR chat panel — not both at once
       final showChat = _selectedId.isNotEmpty;
-      if (showChat) {
-        return _buildRightPanel(showBack: true);
-      }
+      if (showChat) return _buildRightPanel(showBack: true);
       return _buildLeftPanel(fullWidth: true);
     }
 

@@ -785,40 +785,51 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               style: TextStyle(
                   fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(width: 12),
-          // ── Month navigator ──────────────────────────────────────────
-          _MonthNav(
-            month:   _viewMonth,
-            onPrev:  () => _changeMonth(-1),
-            onNext:  () => _changeMonth(1),
-            onToday: _isViewingCurrentMonth ? null : () => _jumpToMonth(
-                DateTime(DateTime.now().year, DateTime.now().month, 1)),
+          // ── Month navigator + import button (scrollable on narrow screens) ──
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              reverse: true,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _MonthNav(
+                    month:   _viewMonth,
+                    onPrev:  () => _changeMonth(-1),
+                    onNext:  () => _changeMonth(1),
+                    onToday: _isViewingCurrentMonth ? null : () => _jumpToMonth(
+                        DateTime(DateTime.now().year, DateTime.now().month, 1)),
+                  ),
+                  const SizedBox(width: 12),
+                  isMobile
+                      ? IconButton(
+                          onPressed: _importExcel,
+                          icon: const Icon(Icons.upload_file_rounded, size: 18),
+                          style: IconButton.styleFrom(
+                            foregroundColor: const Color(0xFF6366F1),
+                          ),
+                          tooltip: 'Import Excel',
+                        )
+                      : OutlinedButton.icon(
+                          onPressed: _importExcel,
+                          icon: const Icon(Icons.upload_file_rounded, size: 14),
+                          label: const Text('Import Excel',
+                              style: TextStyle(fontSize: 13)),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF6366F1),
+                            side: const BorderSide(color: Color(0xFF6366F1)),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8)),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 10),
+                            minimumSize:   Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        ),
+                ],
+              ),
+            ),
           ),
-          const Spacer(),
-          isMobile
-              ? IconButton(
-                  onPressed: _importExcel,
-                  icon: const Icon(Icons.upload_file_rounded, size: 18),
-                  style: IconButton.styleFrom(
-                    foregroundColor: const Color(0xFF6366F1),
-                  ),
-                  tooltip: 'Import Excel',
-                )
-              : OutlinedButton.icon(
-                  onPressed: _importExcel,
-                  icon: const Icon(Icons.upload_file_rounded, size: 14),
-                  label: const Text('Import Excel',
-                      style: TextStyle(fontSize: 13)),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFF6366F1),
-                    side: const BorderSide(color: Color(0xFF6366F1)),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8)),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 10),
-                    minimumSize:   Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                ),
         ],
       ),
     );
@@ -997,6 +1008,8 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           child: GestureDetector(
             // Touch-drag support (mobile web) — PointerScrollEvent doesn't fire
             // for touch gestures, so we handle vertical drag explicitly.
+            // onVerticalDragUpdate only fires for primarily-vertical gestures,
+            // leaving horizontal swipes for the native SingleChildScrollView below.
             onVerticalDragUpdate: (details) {
               if (_vScroll.hasClients) {
                 _vScroll.jumpTo(
@@ -1118,8 +1131,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
               // RIGHT: employee cells — h-scroll via SingleChildScrollView,
               // v-scroll synced from _vScroll via _onVScrollChange.
+              // ScrollConfiguration enables native touch drag for horizontal scroll.
               Expanded(
-                child: Scrollbar(
+                child: ScrollConfiguration(
+                  behavior: ScrollConfiguration.of(context).copyWith(
+                    dragDevices: {
+                      PointerDeviceKind.touch,
+                      PointerDeviceKind.mouse,
+                      PointerDeviceKind.trackpad,
+                    },
+                  ),
+                  child: Scrollbar(
                   controller: _hScrollEmp,
                   thumbVisibility: true,
                   notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
@@ -1207,6 +1229,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                       ),
                     ),
                   ),
+                ),
                 ),
                 ),
               ],
@@ -1351,38 +1374,42 @@ class _AnalysisPanel extends StatelessWidget {
                     fontWeight: FontWeight.w700,
                     color: _kPrimary)),
             const Spacer(),
-            Container(
+            Flexible(child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
                 color:        const Color(0xFFF0F2F8),
                 borderRadius: BorderRadius.circular(20),
               ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.schedule_rounded, size: 11, color: Color(0xFF6B7280)),
-                const SizedBox(width: 4),
-                Text(_fmtHours(teamHours),
-                    style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF6B7280))),
-                const SizedBox(width: 8),
-                Container(width: 1, height: 10, color: const Color(0xFFD1D5DB)),
-                const SizedBox(width: 8),
-                Text('${teamDays}d',
-                    style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF10B981))),
-                const SizedBox(width: 6),
-                Text('·',
-                    style: TextStyle(fontSize: 11, color: Colors.grey[400])),
-                const SizedBox(width: 6),
-                Text('${teamLeaves}L',
-                    style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: _kAccent)),
-              ]),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.schedule_rounded, size: 11, color: Color(0xFF6B7280)),
+                  const SizedBox(width: 4),
+                  Text(_fmtHours(teamHours),
+                      style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF6B7280))),
+                  const SizedBox(width: 8),
+                  Container(width: 1, height: 10, color: const Color(0xFFD1D5DB)),
+                  const SizedBox(width: 8),
+                  Text('${teamDays}d',
+                      style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF10B981))),
+                  const SizedBox(width: 6),
+                  Text('·',
+                      style: TextStyle(fontSize: 11, color: Colors.grey[400])),
+                  const SizedBox(width: 6),
+                  Text('${teamLeaves}L',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: _kAccent)),
+                ]),
+              ),
+            ),
             ),
           ]),
           const SizedBox(height: 16),
@@ -1397,7 +1424,7 @@ class _AnalysisPanel extends StatelessWidget {
                 physics: const NeverScrollableScrollPhysics(),
                 crossAxisSpacing: 12,
                 mainAxisSpacing: 12,
-                childAspectRatio: cols == 1 ? 3.8 : 2.0,
+                childAspectRatio: cols == 1 ? 2.6 : 2.0,
                 children: summaries.map((s) => _StatCard(s)).toList(),
               );
             },
