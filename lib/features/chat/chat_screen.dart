@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui' show ImageFilter;
 import 'dart:math' show min;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../core/api/api_client.dart';
 import '../../core/auth/auth_bloc.dart';
@@ -311,6 +313,17 @@ class _ChatScreenState extends State<ChatScreen> {
   final _msgCtrl    = TextEditingController();
   final _searchCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
+  late  final _msgFocus  = FocusNode(onKeyEvent: (_, event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.enter &&
+        !HardwareKeyboard.instance.isShiftPressed) {
+      if (_msgCtrl.text.trim().isNotEmpty && _selectedId.isNotEmpty) {
+        _sendMessage();
+      }
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  });
 
   String _search = '';
   bool _loadingConversations = true;
@@ -359,8 +372,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final convId = data['conversation_id'] as String?;
     // Always refresh sidebar preview
     _loadConversations();
-    // If the message belongs to the open conversation, append it
+    // If the message belongs to the open conversation, append it.
+    // Skip own messages — they were already added optimistically in _sendMessage.
     if (convId == _selectedId) {
+      final senderId = data['sender_id'] as String?;
+      if (senderId == _myUserId) return;
       final parsed = _parseMessage(data);
       if (parsed != null && mounted) {
         setState(() => _messages.add(parsed));
@@ -470,6 +486,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _onlineUsersSub?.cancel();
     if (_selectedId.isNotEmpty) _socket.leaveConversation(_selectedId);
     _msgCtrl.dispose();
+    _msgFocus.dispose();
     _searchCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
@@ -1226,7 +1243,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 // Bubble — accent bg for sent, light gray for received
                 Container(
-                  constraints: const BoxConstraints(maxWidth: 340),
+                  constraints: const BoxConstraints(maxWidth: 400),
                   padding: const EdgeInsets.symmetric(
                       horizontal: 14, vertical: 10),
                   decoration: BoxDecoration(
@@ -1239,10 +1256,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                     border: isSent ? null : Border.all(color: _kBorder),
                   ),
-                  child: Text(msg.text ?? '',
-                      style: TextStyle(
-                          fontSize: 13,
-                          color: isSent ? Colors.white : _kPrimary)),
+                  child: _buildBubbleContent(msg.text ?? '', isSent),
                 ),
                 const SizedBox(height: 4),
                 // Timestamp
@@ -1261,6 +1275,73 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
+  }
+
+  // Renders plain text or a formatted JSON block with a copy button.
+  Widget _buildBubbleContent(String text, bool isSent) {
+    final trimmed = text.trim();
+    // Detect JSON: must start with { or [
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        final parsed   = jsonDecode(trimmed);
+        final pretty   = const JsonEncoder.withIndent('  ').convert(parsed);
+        final codeBg   = isSent ? Colors.black12 : const Color(0xFFEEF1F6);
+        final codeText = isSent ? Colors.white    : _kPrimary;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('JSON',
+                    style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: isSent ? Colors.white70 : Colors.grey[500])),
+                const Spacer(),
+                GestureDetector(
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: pretty));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Copied to clipboard'),
+                        duration: Duration(milliseconds: 1500),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  },
+                  child: Icon(Icons.copy_rounded,
+                      size: 14,
+                      color: isSent ? Colors.white70 : Colors.grey[500]),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color:        codeBg,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: SelectableText(
+                pretty,
+                style: TextStyle(
+                    fontSize:   11,
+                    fontFamily: 'monospace',
+                    height:     1.5,
+                    color:      codeText),
+              ),
+            ),
+          ],
+        );
+      } catch (_) {
+        // Not valid JSON — fall through to plain text
+      }
+    }
+    return Text(text,
+        style: TextStyle(
+            fontSize: 13, color: isSent ? Colors.white : _kPrimary));
   }
 
   // Image message — thumbnail placeholder + caption + timestamp
@@ -1748,6 +1829,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               child: TextField(
                 controller: _msgCtrl,
+                focusNode:  _msgFocus,
                 maxLines: null,   // grows vertically with content
                 style: const TextStyle(fontSize: 13),
                 decoration: InputDecoration(

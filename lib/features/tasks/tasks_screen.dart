@@ -246,6 +246,11 @@ class _TasksScreenState extends State<TasksScreen> {
   final Map<String, Map<String, dynamic>> _pendingTaskUpdates = {};
   bool _loadingTasks = true;
 
+  // Cached tasks for local operations (pin) without extra API calls
+  List<TaskItem> _loadedTasks = [];
+  // IDs of pinned tasks — pinned tasks float to top of each column
+  final Set<String> _pinnedIds = {};
+
   // Users loaded from API (for assignee / reviewer dropdowns in new task dialog)
   List<Map<String, dynamic>> _users = [];
 
@@ -481,46 +486,8 @@ class _TasksScreenState extends State<TasksScreen> {
           .map((j) => TaskItem.fromJson(j as Map<String, dynamic>))
           .toList();
 
-      // Group tasks by column
-      final todoItems       = <AppFlowyGroupItem>[];
-      final inProgressItems = <AppFlowyGroupItem>[];
-      final doneItems       = <AppFlowyGroupItem>[];
-      final ideaItems       = <AppFlowyGroupItem>[];
-
-      final today = DateTime.now();
-      for (final task in tasks) {
-        if (task.status == 'idea' || task.status == 'archived') {
-          ideaItems.add(task);
-        } else if (task.status == 'completed') {
-          doneItems.add(task);
-        } else if (task.date != null &&
-            !task.date!.isAfter(DateTime(today.year, today.month, today.day))) {
-          inProgressItems.add(task);
-        } else {
-          final group = TaskItem.columnToGroup(task.columnGroup);
-          switch (group) {
-            case 'in_progress': inProgressItems.add(task);
-            case 'done':        doneItems.add(task);
-            default:            todoItems.add(task);
-          }
-        }
-      }
-
-      // Sort by sort_order within each group
-      todoItems.sort((a, b) => (a as TaskItem).sortOrder.compareTo((b as TaskItem).sortOrder));
-      inProgressItems.sort((a, b) => (a as TaskItem).sortOrder.compareTo((b as TaskItem).sortOrder));
-      doneItems.sort((a, b) => (a as TaskItem).sortOrder.compareTo((b as TaskItem).sortOrder));
-
-      // Clear and rebuild board
-      for (final g in _boardCtrl.groupDatas.toList()) {
-        _boardCtrl.removeGroup(g.id);
-      }
-
-      _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo',        name: 'To Do',       items: todoItems));
-      _boardCtrl.addGroup(AppFlowyGroupData(id: 'in_progress', name: 'In Progress', items: inProgressItems));
-      _boardCtrl.addGroup(AppFlowyGroupData(id: 'done',        name: 'Done',        items: doneItems));
-      _boardCtrl.addGroup(AppFlowyGroupData(id: 'idea',        name: 'Ideas',       items: ideaItems));
-
+      _loadedTasks = tasks;
+      _rebuildBoard(tasks);
     } catch (_) {
       // If API fails, show empty board
       for (final g in _boardCtrl.groupDatas.toList()) {
@@ -532,6 +499,65 @@ class _TasksScreenState extends State<TasksScreen> {
       _boardCtrl.addGroup(AppFlowyGroupData(id: 'idea',        name: 'Ideas',       items: []));
     }
     if (mounted) setState(() => _loadingTasks = false);
+  }
+
+  void _rebuildBoard(List<TaskItem> tasks) {
+    final todoItems       = <AppFlowyGroupItem>[];
+    final inProgressItems = <AppFlowyGroupItem>[];
+    final doneItems       = <AppFlowyGroupItem>[];
+    final ideaItems       = <AppFlowyGroupItem>[];
+
+    final today = DateTime.now();
+    for (final task in tasks) {
+      if (task.status == 'idea' || task.status == 'archived') {
+        ideaItems.add(task);
+      } else if (task.status == 'completed') {
+        doneItems.add(task);
+      } else if (task.date != null &&
+          !task.date!.isAfter(DateTime(today.year, today.month, today.day))) {
+        inProgressItems.add(task);
+      } else {
+        final group = TaskItem.columnToGroup(task.columnGroup);
+        switch (group) {
+          case 'in_progress': inProgressItems.add(task);
+          case 'done':        doneItems.add(task);
+          default:            todoItems.add(task);
+        }
+      }
+    }
+
+    int pinSort(AppFlowyGroupItem a, AppFlowyGroupItem b) {
+      final ta = a as TaskItem;
+      final tb = b as TaskItem;
+      final ap = _pinnedIds.contains(ta.backendId) ? 0 : 1;
+      final bp = _pinnedIds.contains(tb.backendId) ? 0 : 1;
+      if (ap != bp) return ap.compareTo(bp);
+      return ta.sortOrder.compareTo(tb.sortOrder);
+    }
+
+    todoItems.sort(pinSort);
+    inProgressItems.sort(pinSort);
+    doneItems.sort(pinSort);
+    ideaItems.sort(pinSort);
+
+    for (final g in _boardCtrl.groupDatas.toList()) {
+      _boardCtrl.removeGroup(g.id);
+    }
+    _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo',        name: 'To Do',       items: todoItems));
+    _boardCtrl.addGroup(AppFlowyGroupData(id: 'in_progress', name: 'In Progress', items: inProgressItems));
+    _boardCtrl.addGroup(AppFlowyGroupData(id: 'done',        name: 'Done',        items: doneItems));
+    _boardCtrl.addGroup(AppFlowyGroupData(id: 'idea',        name: 'Ideas',       items: ideaItems));
+  }
+
+  void _togglePin(String taskId) {
+    setState(() {
+      if (_pinnedIds.contains(taskId)) {
+        _pinnedIds.remove(taskId);
+      } else {
+        _pinnedIds.add(taskId);
+      }
+    });
+    _rebuildBoard(_loadedTasks);
   }
 
   /// Called when a card is dragged to a different column
@@ -744,9 +770,11 @@ class _TasksScreenState extends State<TasksScreen> {
                   onTap: () => _toggleCard(cardId),
                   child: Stack(children: [
                     _TaskCard(
-                      item:       item,
-                      isSelected: _selectedIds.contains(cardId),
-                      onTap:      () => _toggleCard(cardId),
+                      item:        item,
+                      isSelected:  _selectedIds.contains(cardId),
+                      isPinned:    _pinnedIds.contains(cardId),
+                      onTap:       () => _toggleCard(cardId),
+                      onPinToggle: () => _togglePin(cardId),
                     ),
                     Positioned(
                       top: 8, right: 8,
@@ -774,9 +802,11 @@ class _TasksScreenState extends State<TasksScreen> {
             return AppFlowyGroupCard(
               key: ValueKey(item.id),
               child: _TaskCard(
-                item:       item,
-                isSelected: _selectedTask?.id == item.id,
-                onTap:      () => _showTaskDetailModal(item),
+                item:        item,
+                isSelected:  _selectedTask?.id == item.id,
+                isPinned:    _pinnedIds.contains(item.backendId ?? item.id),
+                onTap:       () => _showTaskDetailModal(item),
+                onPinToggle: () => _togglePin(item.backendId ?? item.id),
               ),
             );
           },
@@ -1078,7 +1108,6 @@ class _TasksScreenState extends State<TasksScreen> {
     Priority selectedPriority = Priority.medium;
     DateTime? selectedDate;
     DateTime? selectedEndDate;
-    bool      endDateEnabled  = false;
     bool      showCalendar    = false;
 
     final dialogTypeOpts = List<SelectOption>.from(_taskTypeOpts);
@@ -1098,6 +1127,10 @@ class _TasksScreenState extends State<TasksScreen> {
     )).toList();
     List<String> selectedPersonIds   = [];
     List<String> selectedReviewerIds = [];
+    String? _errTitle;
+    String? _errDate;
+    String? _errPerson;
+    String? _errReviewer;
     const border   = OutlineInputBorder(
       borderRadius: BorderRadius.all(Radius.circular(8)),
       borderSide:   BorderSide(color: _kBorder),
@@ -1117,11 +1150,10 @@ class _TasksScreenState extends State<TasksScreen> {
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
     );
 
-    // barrierDismissible: true — tapping outside closes the dialog.
-    // .then() fires after close and saves the card if a title was entered.
+   
     showDialog<void>(
       context: context,
-      barrierDismissible: true,
+      barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlg) => AlertDialog(
           backgroundColor: _kSurface,
@@ -1142,7 +1174,20 @@ class _TasksScreenState extends State<TasksScreen> {
                     controller: titleCtrl,
                     autofocus:  true,
                     style:      const TextStyle(fontSize: 13),
-                    decoration: fieldDeco('Title'),
+                    onChanged:  (_) { if (_errTitle != null) setDlg(() => _errTitle = null); },
+                    decoration: fieldDeco('Title *').copyWith(
+                      enabledBorder: _errTitle != null
+                          ? const OutlineInputBorder(
+                              borderRadius: BorderRadius.all(Radius.circular(8)),
+                              borderSide:   BorderSide(color: Colors.red),
+                            )
+                          : null,
+                    ),
+                  ),
+                  if (_errTitle != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4, left: 4),
+                      child: Text(_errTitle!, style: const TextStyle(fontSize: 11, color: Colors.red)),
                   ),
                   const SizedBox(height: 12),
                   TextField(
@@ -1156,11 +1201,12 @@ class _TasksScreenState extends State<TasksScreen> {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
-                      border:       Border.all(color: _kBorder),
+                      border:       Border.all(color: _errPerson != null ? 
+                      Colors.red : _kBorder),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: SelectOptionField(
-                      label:           'Person',
+                      label:           'Person *',
                       options:         personOpts,
                       selectedOptions: selectedPersonIds,
                       onOptionSelected: (id) {
@@ -1169,6 +1215,7 @@ class _TasksScreenState extends State<TasksScreen> {
                             selectedPersonIds.remove(id);
                           } else {
                             selectedPersonIds.add(id);
+                            _errPerson = null;
                           }
                         });
                       },
@@ -1178,16 +1225,22 @@ class _TasksScreenState extends State<TasksScreen> {
                       onOptionColorChanged: (_, _) {},
                     ),
                   ),
+                  if (_errPerson != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4, left: 4),
+                      child: Text(_errPerson!, style: const TextStyle(fontSize: 11, color: Colors.red)),
+                  ),
                   const SizedBox(height: 12),
                   // Reviewer (captain)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
-                      border:       Border.all(color: _kBorder),
+                      border:       Border.all(color: _errReviewer != null ?
+                      Colors.red : _kBorder),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: SelectOptionField(
-                      label:           'Reviewer',
+                      label:           'Reviewer *',
                       options:         reviewerOpts,
                       selectedOptions: selectedReviewerIds,
                       onOptionSelected: (id) {
@@ -1196,6 +1249,7 @@ class _TasksScreenState extends State<TasksScreen> {
                             selectedReviewerIds.remove(id);
                           } else {
                             selectedReviewerIds.add(id);
+                            _errReviewer = null;
                           }
                         });
                       },
@@ -1203,6 +1257,12 @@ class _TasksScreenState extends State<TasksScreen> {
                       onOptionRenamed:      (_, _) {},
                       onOptionColorChanged: (_, _) {},
                     ),
+                  ),
+                  if (_errReviewer != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4, left: 4),
+                      child: Text(_errReviewer!, style: const TextStyle
+                      (fontSize: 11, color: Colors.red)),
                   ),
                   const SizedBox(height: 12),
                   // Priority dropdown
@@ -1357,14 +1417,21 @@ class _TasksScreenState extends State<TasksScreen> {
                           borderRadius: BorderRadius.circular(8),
                           onTap: () => setDlg(() => showCalendar = !showCalendar),
                           child: InputDecorator(
-                            decoration: fieldDeco('Date'),
+                            decoration: fieldDeco('Date *').copyWith(
+                              enabledBorder: _errDate != null
+                                  ? const OutlineInputBorder(
+                                      borderRadius: BorderRadius.all(Radius.circular(8)),
+                                      borderSide:   BorderSide(color: Colors.red),
+                                    )
+                                  : null,
+                            ),
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
                                 Text(
                                   selectedDate == null
                                       ? 'Pick a date'
-                                      : (endDateEnabled && selectedEndDate != null)
+                                      : selectedEndDate != null
                                           ? '${_fmtDate(selectedDate!)}  →  ${_fmtDate(selectedEndDate!)}'
                                           : _fmtDateLong(selectedDate!),
                                   style: TextStyle(
@@ -1390,35 +1457,99 @@ class _TasksScreenState extends State<TasksScreen> {
                           _InlineDatePicker(
                             selected:       selectedDate,
                             endDate:        selectedEndDate,
-                            endDateEnabled: endDateEnabled,
                             onSelect: (d) => setDlg(() {
                               selectedDate    = d;
                               selectedEndDate = null;
+                              _errDate        = null;
                             }),
-                            onEndSelect: (d) =>
-                                setDlg(() => selectedEndDate = d),
-                            onEndDateToggle: (v) => setDlg(() {
-                              endDateEnabled  = v;
-                              if (!v) selectedEndDate = null;
-                            }),
+                            onEndSelect:    (d) => setDlg(() => selectedEndDate = d),
+                            onEndDateClear: ()  => setDlg(() => selectedEndDate = null),
                           ),
                       ],
                     ),
                   ),
-                  // Hint at the bottom of the form — no buttons
-                  const SizedBox(height: 8),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    decoration: const BoxDecoration(
-                      color:  _kBg,
-                      border: Border(top: BorderSide(color: _kBorder)),
+                  if (_errDate != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4, left: 4),
+                      child: Text(_errDate!, style: const TextStyle(fontSize: 11, color: Colors.red)),
                     ),
-                    child: const Text(
-                      'Click outside to save  ·  Leave title empty to discard',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(fontSize: 11, color: _kMuted),
-                    ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: () {
+                          titleCtrl.dispose();
+                          descCtrl.dispose();
+                          Navigator.of(ctx).pop();
+                        },
+                        child: const Text('Cancel', style: TextStyle(color: _kMuted)),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _kAccent,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        onPressed: () async {
+                          final eTitle    = titleCtrl.text.trim().isEmpty ? 'Title is required' : null;
+                          final eDate     = selectedDate == null ? 'Date is required' : null;
+                          final ePerson   = selectedPersonIds.isEmpty ? 'At least one assignee is required' : null;
+                          final eReviewer = selectedReviewerIds.isEmpty ? 'At least one reviewer is required' : null;
+                          if (eTitle != null || eDate != null || ePerson != null || eReviewer != null) {
+                            setDlg(() {
+                              _errTitle    = eTitle;
+                              _errDate     = eDate;
+                              _errPerson   = ePerson;
+                              _errReviewer = eReviewer;
+                            });
+                            return;
+                          }
+                          try {
+                            final data = <String, dynamic>{
+                              'title':        titleCtrl.text.trim(),
+                              'description':  descCtrl.text.trim(),
+                              'priority':     selectedPriority.apiValue,
+                              'column_group': TaskItem.groupToColumn(selectedGroup),
+                              'date':         selectedDate!.toIso8601String().split('T').first,
+                              'person_ids':   selectedPersonIds,
+                              'reviewer_ids': selectedReviewerIds,
+                            };
+                            if (selectedEndDate != null) {
+                              data['end_date'] = selectedEndDate!.toIso8601String().split('T').first;
+                            }
+                            if (selectedTypeIds.isNotEmpty) {
+                              data['type_ids'] = selectedTypeIds;
+                            }
+                            await _api.createTask(data);
+                            titleCtrl.dispose();
+                            descCtrl.dispose();
+                            if (ctx.mounted) Navigator.of(ctx).pop();
+                            await _loadTasks();
+                          } on DioException catch (e) {
+                            final backendMsg = e.response?.data is Map
+                                ? (e.response!.data as Map)['error']?.toString()
+                                : null;
+                            final msg = backendMsg ?? 'Failed to create task (${e.response?.statusCode ?? 'network error'})';
+                            debugPrint('[Tasks] createTask failed: $msg | full response: ${e.response?.data}');
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text(msg), backgroundColor: Colors.red[700]),
+                              );
+                            }
+                          } catch (e) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Failed to create task: $e')),
+                              );
+                            }
+                          }
+                        },
+                        child: const Text('Create Task', style: TextStyle(fontSize: 13)),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -1426,58 +1557,7 @@ class _TasksScreenState extends State<TasksScreen> {
           ),
         ),
       ),
-    ).then((_) async {
-      // Fires when dialog is dismissed (barrier tap, back button, etc.)
-      if (!mounted) return;
-      final title = titleCtrl.text.trim();
-      if (title.isNotEmpty) {
-        try {
-          final data = <String, dynamic>{
-            'title':        title,
-            'description':  descCtrl.text.trim(),
-            'priority':     selectedPriority.apiValue,
-            'column_group': TaskItem.groupToColumn(selectedGroup),
-          };
-          if (selectedDate != null) {
-            data['date'] = selectedDate!.toIso8601String().split('T').first;
-          }
-          if (selectedEndDate != null) {
-            data['end_date'] = selectedEndDate!.toIso8601String().split('T').first;
-          }
-          if (selectedTypeIds.isNotEmpty) {
-            data['type_ids'] = selectedTypeIds;
-          }
-          if (selectedPersonIds.isNotEmpty) {
-            data['person_ids'] = selectedPersonIds;
-          }
-          if (selectedReviewerIds.isNotEmpty) {
-            data['reviewer_ids'] = selectedReviewerIds;
-          }
-          await _api.createTask(data);
-          await _loadTasks();
-        } on DioException catch (e) {
-          // Extract the backend's actual error message from {error: "..."}
-          final backendMsg = e.response?.data is Map
-              ? (e.response!.data as Map)['error']?.toString()
-              : null;
-          final msg = backendMsg ?? 'Failed to create task (${e.response?.statusCode ?? 'network error'})';
-          debugPrint('[Tasks] createTask failed: $msg | full response: ${e.response?.data}');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(msg), backgroundColor: Colors.red[700]),
-            );
-          }
-        } catch (e) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Failed to create task: $e')),
-            );
-          }
-        }
-      }
-      titleCtrl.dispose();
-      descCtrl.dispose();
-    });
+    );
   }
 }
 
@@ -1818,10 +1898,12 @@ class _FilterDropdown<T> extends StatelessWidget {
       color: Colors.white,
       elevation: 4,
       itemBuilder: (_) => [
-        // "All" option to clear
+        // "All" option to clear — onTap is needed because PopupMenuButton.onSelected
+        // silently skips null values; onTap fires unconditionally.
         PopupMenuItem<T?>(
           value: null,
           height: 32,
+          onTap: () => onChanged(null),
           child: Text('All',
               style: TextStyle(
                   fontSize: 12,
@@ -2107,12 +2189,16 @@ class _MetaChip extends StatelessWidget {
 class _TaskCard extends StatelessWidget {
   final TaskItem   item;
   final bool       isSelected;
+  final bool       isPinned;
   final VoidCallback onTap;
+  final VoidCallback onPinToggle;
 
   const _TaskCard({
     required this.item,
     required this.isSelected,
+    required this.isPinned,
     required this.onTap,
+    required this.onPinToggle,
   });
 
   @override
@@ -2178,6 +2264,16 @@ class _TaskCard extends StatelessWidget {
                 if (item.isDone)
                   const Icon(Icons.check_circle_rounded,
                       size: 14, color: _kDone),
+                const SizedBox(width: 4),
+                GestureDetector(
+                  onTap: onPinToggle,
+                  behavior: HitTestBehavior.opaque,
+                  child: Icon(
+                    isPinned ? Icons.push_pin_rounded : Icons.push_pin_outlined,
+                    size: 13,
+                    color: isPinned ? _kAccent : _kMuted.withValues(alpha: 0.5),
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 10),
@@ -2387,13 +2483,14 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   final _commentCtrl      = TextEditingController();
   final _dateRowKey       = GlobalKey();
   OverlayEntry? _dateOverlay;
-  late bool _endDateEnabled = widget.item.endDate != null;
   // Snapshot of date values taken when the picker opens — used to skip the
   // save if the user closes without actually changing anything.
   DateTime? _pickerOpenDate;
   DateTime? _pickerOpenEndDate;
   bool _dateDirty = false;
   Timer? _debounce;
+  Timer? _personDebounce;
+  Timer? _reviewerDebounce;
 
   late final List<SelectOption> _typeOpts = List<SelectOption>.from(widget.typeOptions);
 
@@ -2421,9 +2518,14 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   bool                       _loadingComments = false;
   bool                       _postingComment  = false;
 
+  // Cached so _closeDateOverlay can fire during dispose() without touching
+  // a deactivated context (which would throw _dependents.isEmpty assertion).
+  late final ApiClient _panelApi;
+
   @override
   void initState() {
     super.initState();
+    _panelApi = context.read<ApiClient>();
     _loadComments();
   }
 
@@ -2432,7 +2534,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     if (id == null) return;
     setState(() => _loadingComments = true);
     try {
-      final res = await context.read<ApiClient>().getTaskComments(id);
+      final res = await _panelApi.getTaskComments(id);
       if (mounted) {
         setState(() {
           _comments = (res.data as List).cast<Map<String, dynamic>>();
@@ -2448,6 +2550,8 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   @override
   void dispose() {
     _debounce?.cancel();
+    _personDebounce?.cancel();
+    _reviewerDebounce?.cancel();
     _closeDateOverlay();
     _titleCtrl.dispose();
     _descCtrl.dispose();
@@ -2462,7 +2566,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     final id = widget.item.backendId;
     if (id == null) return;
     try {
-      final res = await context.read<ApiClient>().updateTask(id, data);
+      final res = await _panelApi.updateTask(id, data);
       if (!mounted) return;
       final json = res.data;
       if (json is Map<String, dynamic>) {
@@ -2532,7 +2636,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     );
     if (confirmed != true || !mounted) return;
     try {
-      await context.read<ApiClient>().deleteTasks([id]);
+      await _panelApi.deleteTasks([id]);
       widget.onDeleted?.call();
     } catch (_) {
       if (mounted) {
@@ -2629,7 +2733,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
 
   Future<void> _submitForReview() async {
     final item = widget.item;
-    final api = context.read<ApiClient>();
+    final api = _panelApi;
     final messenger = ScaffoldMessenger.of(context);
 
     // Optimistic update
@@ -2648,7 +2752,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
 
   Future<void> _markComplete() async {
     final item  = widget.item;
-    final api   = context.read<ApiClient>();
+    final api   = _panelApi;
     final messenger = ScaffoldMessenger.of(context);
 
     // Optimistic update
@@ -2763,7 +2867,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   Future<void> _reviewPauseRequest(String requestId, String status) async {
     final item = widget.item;
     try {
-      await context.read<ApiClient>().reviewPauseRequest(requestId, status);
+      await _panelApi.reviewPauseRequest(requestId, status);
       setState(() {
         item.pendingPauseRequest = null;
         if (status == 'approved') item.isPaused = true;
@@ -2831,7 +2935,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    final api = context.read<ApiClient>();
+    final api = _panelApi;
     final item = widget.item;
     final note = noteCtrl.text.trim().isEmpty ? null : noteCtrl.text.trim();
     noteCtrl.dispose();
@@ -2857,7 +2961,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   }
 
   Future<void> _resumeTask() async {
-    final api = context.read<ApiClient>();
+    final api = _panelApi;
     final item = widget.item;
     setState(() => item.isPaused = false);
     try {
@@ -2938,7 +3042,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       return;
     }
     try {
-      final res = await context.read<ApiClient>().requestIdeaMove(item.backendId!, reason);
+      final res = await _panelApi.requestIdeaMove(item.backendId!, reason);
       if (!mounted) return;
       final data = res.data as Map<String, dynamic>;
       final used      = data['moves_used_this_month'] as int? ?? 0;
@@ -2976,12 +3080,11 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     final size = rb.size;
 
     _dateOverlay = OverlayEntry(builder: (_) => _DatePickerOverlay(
-      anchorPos:      Offset(pos.dx, pos.dy + size.height + 4),
-      anchorRight:    pos.dx + size.width,
-      selected:       item.date,
-      endDate:        item.endDate,
-      endDateEnabled: _endDateEnabled,
-      onClose:        _closeDateOverlay,
+      anchorPos:   Offset(pos.dx, pos.dy + size.height + 4),
+      anchorRight: pos.dx + size.width,
+      selected:    item.date,
+      endDate:     item.endDate,
+      onClose:     _closeDateOverlay,
       onSelect: (d) {
         setState(() { item.date = d; item.endDate = null; _dateDirty = true; });
         widget.onChanged();
@@ -2992,8 +3095,9 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
         widget.onChanged();
         _dateOverlay?.markNeedsBuild();
       },
-      onEndDateToggle: (v) {
-        setState(() { _endDateEnabled = v; if (!v) item.endDate = null; _dateDirty = true; });
+      onEndDateClear: () {
+        setState(() { item.endDate = null; _dateDirty = true; });
+        widget.onChanged();
         _dateOverlay?.markNeedsBuild();
       },
     ));
@@ -3015,7 +3119,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       if (dateChanged || endDateChanged) {
         final id = item.backendId;
         if (id != null) {
-          context.read<ApiClient>().updateTask(id, {
+          _panelApi.updateTask(id, {
             'date':     item.date?.toIso8601String().substring(0, 10),
             'end_date': item.endDate?.toIso8601String().substring(0, 10),
           });
@@ -3177,7 +3281,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                         Text(
                           item.date == null
                               ? 'Set date'
-                              : (_endDateEnabled && item.endDate != null)
+                              : item.endDate != null
                                   ? '${_fmtDate(item.date!)}  →  ${_fmtDate(item.endDate!)}'
                                   : _fmtDate(item.date!),
                           style: TextStyle(
@@ -3205,14 +3309,12 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   onOptionSelected: (id) {
                     setState(() {
                       if (item.personIds.contains(id)) {
-                        // Toggle off
                         final idx = item.personIds.indexOf(id);
                         item.personIds.removeAt(idx);
                         if (idx < item.assigneeNames.length) {
                           item.assigneeNames.removeAt(idx);
                         }
                       } else {
-                        // Toggle on
                         final u = widget.users.firstWhere(
                           (x) => x['id'] == id,
                           orElse: () => const {},
@@ -3221,8 +3323,12 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                         item.assigneeNames.add((u['name'] as String?) ?? '');
                       }
                     });
-                    widget.onChanged();
-                    _saveField({'person_ids': item.personIds});
+                    // Debounce: wait for user to finish selecting before
+                    // sending. One API call = one task_updated socket broadcast.
+                    _personDebounce?.cancel();
+                    _personDebounce = Timer(const Duration(milliseconds: 600), () {
+                      _saveField({'person_ids': List.from(item.personIds)});
+                    });
                   },
                   onOptionCreated: (_) {},
                 ),
@@ -3250,8 +3356,10 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                         item.reviewerNames.add((u['name'] as String?) ?? '');
                       }
                     });
-                    widget.onChanged();
-                    _saveField({'reviewer_ids': item.reviewerIds});
+                    _reviewerDebounce?.cancel();
+                    _reviewerDebounce = Timer(const Duration(milliseconds: 600), () {
+                      _saveField({'reviewer_ids': List.from(item.reviewerIds)});
+                    });
                   },
                   onOptionCreated: (_) {},
                 ),
@@ -3287,7 +3395,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   onOptionCreated: (name) async {
                     // Persist new type to backend, then assign it to this task
                     try {
-                      final res = await context.read<ApiClient>().createTaskType({
+                      final res = await _panelApi.createTaskType({
                         'name':  name,
                         'color': 'gray',
                       });
@@ -3445,7 +3553,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     setState(() => _postingComment = true);
     _commentCtrl.clear();
     try {
-      final res = await context.read<ApiClient>().addTaskComment(backendId, text);
+      final res = await _panelApi.addTaskComment(backendId, text);
       final comment = res.data as Map<String, dynamic>;
       if (mounted) setState(() => _comments.add(comment));
     } catch (_) {
@@ -3849,22 +3957,20 @@ class _DatePickerOverlay extends StatelessWidget {
   final double              anchorRight;
   final DateTime?           selected;
   final DateTime?           endDate;
-  final bool                endDateEnabled;
   final VoidCallback        onClose;
   final ValueChanged<DateTime>  onSelect;
   final ValueChanged<DateTime>? onEndSelect;
-  final ValueChanged<bool>      onEndDateToggle;
+  final VoidCallback?           onEndDateClear;
 
   const _DatePickerOverlay({
     required this.anchorPos,
     required this.anchorRight,
-    required this.endDateEnabled,
     required this.onClose,
     required this.onSelect,
-    required this.onEndDateToggle,
     this.selected,
     this.endDate,
     this.onEndSelect,
+    this.onEndDateClear,
   });
 
   @override
@@ -3918,10 +4024,9 @@ class _DatePickerOverlay extends StatelessWidget {
               child: _InlineDatePicker(
                 selected:       selected,
                 endDate:        endDate,
-                endDateEnabled: endDateEnabled,
                 onSelect:       onSelect,
                 onEndSelect:    onEndSelect,
-                onEndDateToggle: onEndDateToggle,
+                onEndDateClear: onEndDateClear,
               ),
             ),
           ),
@@ -3938,19 +4043,17 @@ class _DatePickerOverlay extends StatelessWidget {
 
 class _InlineDatePicker extends StatefulWidget {
   final DateTime?               selected;       // start / single date
-  final DateTime?               endDate;        // range end (null when disabled)
-  final bool                    endDateEnabled;
-  final ValueChanged<DateTime>  onSelect;       // fires when start date tapped
-  final ValueChanged<DateTime>? onEndSelect;    // fires when end date tapped
-  final ValueChanged<bool>      onEndDateToggle;
+  final DateTime?               endDate;        // range end (null = single-date mode)
+  final ValueChanged<DateTime>  onSelect;       // start date chosen
+  final ValueChanged<DateTime>? onEndSelect;    // end date chosen
+  final VoidCallback?           onEndDateClear; // end date tapped again → clear it
 
   const _InlineDatePicker({
     this.selected,
     this.endDate,
-    this.endDateEnabled  = false,
     required this.onSelect,
     this.onEndSelect,
-    required this.onEndDateToggle,
+    this.onEndDateClear,
   });
 
   @override
@@ -4097,16 +4200,12 @@ class _InlineDatePickerState extends State<_InlineDatePicker> {
                           d.month == selected.month &&
                           d.day   == selected.day;
 
-                      final isEnd = widget.endDateEnabled &&
-                          endDate != null &&
+                      final isEnd = endDate != null &&
                           d.year  == endDate.year &&
                           d.month == endDate.month &&
                           d.day   == endDate.day;
 
-                      // A day is "in range" only when end-date mode is on AND
-                      // both dates are picked AND this day falls between them.
-                      final isInRange = widget.endDateEnabled &&
-                          selected != null &&
+                      final isInRange = selected != null &&
                           endDate  != null &&
                           d.isAfter(selected) &&
                           d.isBefore(endDate);
@@ -4117,18 +4216,21 @@ class _InlineDatePickerState extends State<_InlineDatePicker> {
                           d.month == today.month &&
                           d.day   == today.day;
 
-                      // Tap logic:
-                      //  • End-date OFF → always set start date
-                      //  • End-date ON  → if no start, or tapped ≤ start → set start
-                      //                   if tapped > start → set end
+                      // Tap logic (no toggle needed):
+                      //  • No start → set start
+                      //  • Has start, no end, different date → set end
+                      //  • Has start, no end, same as start → do nothing (single-date locked)
+                      //  • Has end, tap end again → clear end
+                      //  • Has end, tap other date → set new end
                       void onTap() {
-                        if (!widget.endDateEnabled) {
+                        if (selected == null) {
                           widget.onSelect(d);
-                        } else if (selected == null ||
-                            !d.isAfter(selected)) {
-                          widget.onSelect(d); // set/reset start
+                        } else if (endDate == null) {
+                          if (!isStart) widget.onEndSelect?.call(d);
+                        } else if (isEnd) {
+                          widget.onEndDateClear?.call();
                         } else {
-                          widget.onEndSelect?.call(d); // set end
+                          widget.onEndSelect?.call(d);
                         }
                       }
 
@@ -4186,24 +4288,16 @@ class _InlineDatePickerState extends State<_InlineDatePicker> {
               ],
             ),
           ),
-          // ── End date toggle — functional ──────────────────────────────────────
-          const Divider(height: 1, color: _kBorder),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            child: Row(children: [
-              const Icon(Icons.calendar_today_outlined, size: 13, color: _kMuted),
-              const SizedBox(width: 8),
-              const Text('End date',
-                  style: TextStyle(fontSize: 12, color: _kMuted)),
-              const Spacer(),
-              Switch(
-                value:       widget.endDateEnabled,
-                activeThumbColor: const Color(0xFF2563EB),
-                onChanged:   (v) => widget.onEndDateToggle(v),
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          // Hint: tap a second date to set end; tap end date again to clear it
+          if (endDate != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+              child: Text(
+                'Tap the end date again to remove it',
+                style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+                textAlign: TextAlign.center,
               ),
-            ]),
-          ),
+            ),
         ],
       ),
     );
