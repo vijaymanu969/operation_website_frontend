@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:ui' show ImageFilter;
+import 'dart:ui' show ImageFilter, PointerDeviceKind;
 import 'dart:math' show min;
 import '../../core/socket/socket_service.dart';
 import 'package:dio/dio.dart';
@@ -266,6 +266,9 @@ class _TasksScreenState extends State<TasksScreen> {
       _filterType != null || _filterPriority != null ||
       _filterStatus != null || _filterHealth != null ||
       _filterOverdue;
+
+  // ── Mobile tab: 0 = Tasks, 1 = Analytics (only used on narrow screens) ─────
+  int _mobileTab = 0;
 
   // ── Profile panel (admin: selected person) ───────────────────────────────
   String?               _profileUserId;
@@ -709,118 +712,179 @@ class _TasksScreenState extends State<TasksScreen> {
             ]),
           ),
         const SizedBox(height: 4),
-        Expanded(
-          child: _loadingTasks
-              ? const Center(child: CircularProgressIndicator())
-              : Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // ── Kanban board ────────────────────────────────────────────────
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  child: Scrollbar(
-                    thumbVisibility: true,
-                    notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
-                    child: AppFlowyBoard(
-                    controller:             _boardCtrl,
-                    boardScrollController:  _scrollCtrl,
-                    cardBuilder: (context, group, groupItem) {
-                      final item = groupItem as TaskItem;
-                      final cardId = item.backendId ?? item.id;
-                      if (_selectMode) {
-                        return AppFlowyGroupCard(
-                          key: ValueKey(item.id),
-                          child: GestureDetector(
-                            onTap: () => _toggleCard(cardId),
-                            child: Stack(children: [
-                              _TaskCard(
-                                item:       item,
-                                isSelected: _selectedIds.contains(cardId),
-                                onTap:      () => _toggleCard(cardId),
-                              ),
-                              Positioned(
-                                top: 8, right: 8,
-                                child: IgnorePointer(
-                                  child: Container(
-                                    width: 18, height: 18,
-                                    decoration: BoxDecoration(
-                                      color: _selectedIds.contains(cardId)
-                                          ? _kAccent
-                                          : Colors.white,
-                                      border: Border.all(
-                                        color: _selectedIds.contains(cardId)
-                                            ? _kAccent
-                                            : _kBorder,
-                                        width: 1.5,
-                                      ),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: _selectedIds.contains(cardId)
-                                        ? const Icon(Icons.check, size: 12, color: Colors.white)
-                                        : null,
-                                  ),
-                                ),
-                              ),
-                            ]),
+        Expanded(child: _buildBoardArea(context)),
+      ],
+    );
+  }
+
+  // ── Board area (responsive) ─────────────────────────────────────────────────
+
+  Widget _buildKanbanBoard() {
+    return ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(
+        dragDevices: {
+          PointerDeviceKind.touch,
+          PointerDeviceKind.mouse,
+          PointerDeviceKind.trackpad,
+        },
+      ),
+      child: Scrollbar(
+        thumbVisibility: true,
+        notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
+        child: AppFlowyBoard(
+          controller:            _boardCtrl,
+          boardScrollController: _scrollCtrl,
+          cardBuilder: (context, group, groupItem) {
+            final item   = groupItem as TaskItem;
+            final cardId = item.backendId ?? item.id;
+            if (_selectMode) {
+              return AppFlowyGroupCard(
+                key: ValueKey(item.id),
+                child: GestureDetector(
+                  onTap: () => _toggleCard(cardId),
+                  child: Stack(children: [
+                    _TaskCard(
+                      item:       item,
+                      isSelected: _selectedIds.contains(cardId),
+                      onTap:      () => _toggleCard(cardId),
+                    ),
+                    Positioned(
+                      top: 8, right: 8,
+                      child: IgnorePointer(
+                        child: Container(
+                          width: 18, height: 18,
+                          decoration: BoxDecoration(
+                            color: _selectedIds.contains(cardId) ? _kAccent : Colors.white,
+                            border: Border.all(
+                              color: _selectedIds.contains(cardId) ? _kAccent : _kBorder,
+                              width: 1.5,
+                            ),
+                            borderRadius: BorderRadius.circular(4),
                           ),
-                        );
-                      }
-                      return AppFlowyGroupCard(
-                        key: ValueKey(item.id),
-                        child: _TaskCard(
-                          item:       item,
-                          isSelected: _selectedTask?.id == item.id,
-                          onTap:      () => _showTaskDetailModal(item),
+                          child: _selectedIds.contains(cardId)
+                              ? const Icon(Icons.check, size: 12, color: Colors.white)
+                              : null,
                         ),
-                      );
-                    },
-                    headerBuilder: (context, groupData) => _ColumnHeader(
-                      groupData: groupData,
-                      accentColor: _columnColor(groupData.id),
+                      ),
                     ),
-                    footerBuilder: (_, _) => const SizedBox.shrink(),
-                    groupConstraints: const BoxConstraints.tightFor(width: 300),
-                    config: AppFlowyBoardConfig(
-                      // Column bg slightly off-white so cards (pure white) pop
-                      groupBackgroundColor: _kBg,
-                      stretchGroupHeight:  false,
-                      groupMargin:         const EdgeInsets.only(right: 14),
-                    ),
-                  ),
-                  ),
+                  ]),
                 ),
+              );
+            }
+            return AppFlowyGroupCard(
+              key: ValueKey(item.id),
+              child: _TaskCard(
+                item:       item,
+                isSelected: _selectedTask?.id == item.id,
+                onTap:      () => _showTaskDetailModal(item),
               ),
-              // ── Profile panel ───────────────────────────────────────────
-              // Admin: shown when a person filter is selected.
-              // Worker/intern: always shown with their own data.
-              if (_profileUserId != null)
-                _UserProfilePanel(
-                  loading:      _profileLoading,
-                  data:         _profileData,
-                  onClose: () {
-                    setState(() { _filterPerson = null; _filterOverdue = false; });
-                    _clearProfile();
-                    _loadTasks();
-                  },
-                  onOverdueTap: () {
-                    setState(() => _filterOverdue = true);
-                    _loadTasks();
-                  },
-                )
-              else if (!_isAdminUser(context))
-                _UserProfilePanel(
-                  loading:      _myProfileLoading,
-                  data:         _myProfileData,
-                  showClose:    false,
-                  onClose:      () {},
-                  onOverdueTap: () {
-                    setState(() => _filterOverdue = true);
-                    _loadTasks();
-                  },
-                ),
-            ],
+            );
+          },
+          headerBuilder: (context, groupData) => _ColumnHeader(
+            groupData:   groupData,
+            accentColor: _columnColor(groupData.id),
           ),
+          footerBuilder: (_, _) => const SizedBox.shrink(),
+          groupConstraints: const BoxConstraints.tightFor(width: 300),
+          config: AppFlowyBoardConfig(
+            groupBackgroundColor: _kBg,
+            stretchGroupHeight:  false,
+            groupMargin:         const EdgeInsets.only(right: 14),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBoardArea(BuildContext context) {
+    if (_loadingTasks) return const Center(child: CircularProgressIndicator());
+
+    final isAdmin  = _isAdminUser(context);
+    final hasPanel = _profileUserId != null || !isAdmin;
+    final isMobile = MediaQuery.of(context).size.width < 700;
+
+    // Board widget — shared between mobile and desktop
+    final board = Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: _buildKanbanBoard(),
+    );
+
+    // Profile panel widget — shared between mobile and desktop
+    Widget? panel;
+    if (_profileUserId != null) {
+      panel = _UserProfilePanel(
+        loading:      _profileLoading,
+        data:         _profileData,
+        onClose: () {
+          setState(() {
+            _filterPerson  = null;
+            _filterOverdue = false;
+            _mobileTab     = 0;
+          });
+          _clearProfile();
+          _loadTasks();
+        },
+        onOverdueTap: () {
+          setState(() => _filterOverdue = true);
+          _loadTasks();
+        },
+      );
+    } else if (!isAdmin) {
+      panel = _UserProfilePanel(
+        loading:      _myProfileLoading,
+        data:         _myProfileData,
+        showClose:    false,
+        onClose:      () {},
+        onOverdueTap: () {
+          setState(() => _filterOverdue = true);
+          _loadTasks();
+        },
+      );
+    }
+
+    // ── Desktop: side-by-side ────────────────────────────────────────────────
+    if (!isMobile || !hasPanel || panel == null) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: board),
+          if (panel != null) panel,
+        ],
+      );
+    }
+
+    // ── Mobile: tab toggle ───────────────────────────────────────────────────
+    return Column(
+      children: [
+        // Toggle bar
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Container(
+            height: 36,
+            decoration: BoxDecoration(
+              color:        _kBg,
+              borderRadius: BorderRadius.circular(8),
+              border:       Border.all(color: _kBorder),
+            ),
+            child: Row(children: [
+              _MobileTab(
+                label: 'Tasks',
+                icon:  Icons.view_kanban_outlined,
+                active: _mobileTab == 0,
+                onTap:  () => setState(() => _mobileTab = 0),
+              ),
+              _MobileTab(
+                label: 'Analytics',
+                icon:  Icons.bar_chart_rounded,
+                active: _mobileTab == 1,
+                onTap:  () => setState(() => _mobileTab = 1),
+              ),
+            ]),
+          ),
+        ),
+        // Content
+        Expanded(
+          child: _mobileTab == 0 ? board : panel,
         ),
       ],
     );
@@ -1417,6 +1481,53 @@ class _TasksScreenState extends State<TasksScreen> {
   }
 }
 
+// ─── Reusable: Mobile tab toggle pill ────────────────────────────────────────
+
+class _MobileTab extends StatelessWidget {
+  final String     label;
+  final IconData   icon;
+  final bool       active;
+  final VoidCallback onTap;
+
+  const _MobileTab({
+    required this.label,
+    required this.icon,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          margin: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color:        active ? _kPrimary : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 14,
+                  color: active ? Colors.white : _kMuted),
+              const SizedBox(width: 5),
+              Text(label,
+                  style: TextStyle(
+                    fontSize:   12,
+                    fontWeight: FontWeight.w600,
+                    color:      active ? Colors.white : _kMuted,
+                  )),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ─── Reusable: Top bar ────────────────────────────────────────────────────────
 
 class _TopBar extends StatelessWidget {
@@ -1444,67 +1555,79 @@ class _TopBar extends StatelessWidget {
                   fontSize: 20,
                   fontWeight: FontWeight.bold,
                   color: _kPrimary)),
-          const Spacer(),
-          if (onRequests != null) ...[
-            OutlinedButton.icon(
-              onPressed: onRequests,
-              icon:  const Icon(Icons.inbox_rounded, size: 14),
-              label: const Text('Requests', style: TextStyle(fontSize: 13)),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFF6366F1),
-                side: const BorderSide(color: Color(0xFF6366F1)),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                minimumSize:   Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          const SizedBox(width: 8),
+          // Buttons scroll horizontally on narrow screens instead of overflowing
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              reverse: true, // keeps rightmost buttons (New Task) always visible
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (onRequests != null) ...[
+                    OutlinedButton.icon(
+                      onPressed: onRequests,
+                      icon:  const Icon(Icons.inbox_rounded, size: 14),
+                      label: const Text('Requests', style: TextStyle(fontSize: 13)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF6366F1),
+                        side: const BorderSide(color: Color(0xFF6366F1)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        minimumSize:   Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                  ],
+                  if (onStagnant != null) ...[
+                    OutlinedButton.icon(
+                      onPressed: onStagnant,
+                      icon:  const Icon(Icons.warning_amber_rounded, size: 14),
+                      label: const Text('Stagnant', style: TextStyle(fontSize: 13)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFF97316),
+                        side: const BorderSide(color: Color(0xFFF97316)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        minimumSize:   Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                  ],
+                  // Select / Cancel button
+                  OutlinedButton.icon(
+                    onPressed: onSelectToggle,
+                    icon:  Icon(selectMode ? Icons.close : Icons.checklist_rounded, size: 14),
+                    label: Text(selectMode ? 'Cancel' : 'Select',
+                        style: const TextStyle(fontSize: 13)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _kMuted,
+                      side: const BorderSide(color: _kBorder),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      minimumSize:   Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  FilledButton.icon(
+                    onPressed: onAddTask,
+                    icon:  const Icon(Icons.add, size: 16),
+                    label: const Text('New Task', style: TextStyle(fontSize: 13)),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _kAccent,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      minimumSize:     Size.zero,
+                      tapTargetSize:   MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(width: 10),
-          ],
-          if (onStagnant != null) ...[
-            OutlinedButton.icon(
-              onPressed: onStagnant,
-              icon:  const Icon(Icons.warning_amber_rounded, size: 14),
-              label: const Text('Stagnant', style: TextStyle(fontSize: 13)),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFFF97316),
-                side: const BorderSide(color: Color(0xFFF97316)),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                minimumSize:   Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-            ),
-            const SizedBox(width: 10),
-          ],
-          // Select / Cancel button
-          OutlinedButton.icon(
-            onPressed: onSelectToggle,
-            icon:  Icon(selectMode ? Icons.close : Icons.checklist_rounded, size: 14),
-            label: Text(selectMode ? 'Cancel' : 'Select',
-                style: const TextStyle(fontSize: 13)),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: _kMuted,
-              side: const BorderSide(color: _kBorder),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              minimumSize:   Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-          ),
-          const SizedBox(width: 10),
-          FilledButton.icon(
-            onPressed: onAddTask,
-            icon:  const Icon(Icons.add, size: 16),
-            label: const Text('New Task', style: TextStyle(fontSize: 13)),
-            style: FilledButton.styleFrom(
-              backgroundColor: _kAccent,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              minimumSize:     Size.zero,
-              tapTargetSize:   MaterialTapTargetSize.shrinkWrap,
             ),
           ),
         ],
