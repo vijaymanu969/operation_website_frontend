@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../core/api/api_client.dart';
@@ -129,18 +130,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   ApiClient get _api => context.read<ApiClient>();
 
   // ── Scroll controllers ───────────────────────────────────────────────────────
-  // _hScroll    → header employee-name SingleChildScrollView
-  // _hScrollEmp → body employee-cells SingleChildScrollView (synced with _hScroll)
-  // _hScrollBar → bottom scrollbar     (synced with _hScroll)
-  // _vScroll    → left date ListView   (responds to mouse-wheel naturally)
-  // _vScroll2   → right employee ListView (NeverScrollable; driven by _vScroll sync)
-  final _hScroll       = ScrollController();
+  // _hScrollEmp → body employee-cells SingleChildScrollView (drives the header
+  //               row directly via Transform; no separate header controller)
+  // _vScroll    → left date ListView
+  // _vScroll2   → right employee ListView (bidirectionally synced with _vScroll)
   final _hScrollEmp    = ScrollController();
-  final _hScrollBar    = ScrollController();
   final _vScroll       = ScrollController();
   final _vScroll2      = ScrollController();
   late final _tableFocusNode = FocusNode();
-  bool _syncingH = false;
   bool _syncingV = false;
 
   // Cached summaries — invalidated when data changes, rebuilt lazily.
@@ -177,11 +174,29 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   // scroll chain counters (reset every second by a periodic timer)
   int  _pointerEvents    = 0;   // onPointerSignal fires
   int  _hChangeEvents    = 0;   // _onHScrollChange fires
+  int  _vChangeEvents    = 0;   // _onVScrollChange fires (date col)
+  int  _v2ChangeEvents   = 0;   // _onVScroll2Change fires (employee col)
   int  _lbRebuildCount   = 0;   // ListenableBuilder rebuilds
   Timer? _perfReportTimer;
 
-  // per-event timing (latest jumpTo latency)
-  final Stopwatch _jumpToWatch = Stopwatch();
+  // ── Probe A: frame timings (slow-frame detector) ───────────────────────────
+  int _slowFrames       = 0;
+  double _worstBuildMs  = 0;
+  double _worstRasterMs = 0;
+
+  // ── Probe B: cell itemBuilder rebuild counter ──────────────────────────────
+  // Incremented inside the right-side ListView.builder itemBuilder on each call.
+  // Horizontal scroll should NOT rebuild cells — if this climbs during h-scroll,
+  // something is forcing rebuilds that shouldn't happen.
+  int _cellRebuilds = 0;
+
+  // ── Probe C: touch / pointer-move tracking ─────────────────────────────────
+  // Measures cadence of onPointerMove events and the worst gap between them.
+  // If moves arrive every 16 ms but the worst gap jumps to 100 ms, Flutter's
+  // event loop is stalling (i.e. rebuild work is blocking the main thread).
+  int _pointerMoves = 0;
+  int _worstMoveGapMs = 0;
+  DateTime? _lastMoveAt;
 
   bool _isShiftHeld(PointerScrollEvent event) =>
       HardwareKeyboard.instance.isShiftPressed;
@@ -193,45 +208,98 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   void initState() {
     super.initState();
     _loadAttendance();
-    _hScroll.addListener(_onHScrollChange);
     _hScrollEmp.addListener(_onHScrollEmpChange);
-    // _hScrollBar listener removed — old bottom scrollbar replaced by Scrollbar widget
     _vScroll.addListener(_onVScrollChange);
+    _vScroll2.addListener(_onVScroll2Change);
+    // Probe A: frame-timings callback. Logs slow frames (>16 ms = dropped @ 60Hz).
+    SchedulerBinding.instance.addTimingsCallback(_onFrameTimings);
     // Print a scroll-chain report every second.
     _perfReportTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_pointerEvents == 0 && _hChangeEvents == 0 && _lbRebuildCount == 0) return;
+      final hasActivity = _pointerEvents > 0 || _hChangeEvents > 0 ||
+          _vChangeEvents > 0 || _v2ChangeEvents > 0 ||
+          _lbRebuildCount > 0 || _pointerMoves > 0 || _cellRebuilds > 0 ||
+          _slowFrames > 0;
+      if (!hasActivity) return;
+      String ctrlState(ScrollController c, String label) {
+        if (!c.hasClients) return '$label:NO_CLIENTS';
+        return '$label: off=${c.offset.toStringAsFixed(0)} '
+            'max=${c.position.maxScrollExtent.toStringAsFixed(0)} '
+            'viewport=${c.position.viewportDimension.toStringAsFixed(0)}';
+      }
       debugPrint(
-        '[Scroll/s] pointerEvents=$_pointerEvents  '
-        'hChangeCallbacks=$_hChangeEvents  '
-        'LB-rebuilds=$_lbRebuildCount (should be 0 with new arch)  '
-        '| lastJumpTo=${_jumpToWatch.elapsedMicroseconds}µs',
+        '[Scroll/s] sigs=$_pointerEvents moves=$_pointerMoves '
+        'worstMoveGap=${_worstMoveGapMs}ms | '
+        'hChange=$_hChangeEvents  vChange=$_vChangeEvents  v2Change=$_v2ChangeEvents | '
+        'cellRebuilds=$_cellRebuilds  slowFrames=$_slowFrames '
+        'worstBuild=${_worstBuildMs.toStringAsFixed(1)}ms '
+        'worstRaster=${_worstRasterMs.toStringAsFixed(1)}ms\n'
+        '          rows=${_rows.length} contentH=${(_rows.length * 36).toStringAsFixed(0)}px\n'
+        '          [Ctrl] ${ctrlState(_vScroll, "vScroll")}\n'
+        '                 ${ctrlState(_vScroll2, "vScroll2")}\n'
+        '                 ${ctrlState(_hScrollEmp, "hScrollEmp")}',
       );
-      _pointerEvents  = 0;
-      _hChangeEvents  = 0;
-      _lbRebuildCount = 0;
+      _pointerEvents   = 0;
+      _hChangeEvents   = 0;
+      _vChangeEvents   = 0;
+      _v2ChangeEvents  = 0;
+      _lbRebuildCount  = 0;
+      _pointerMoves    = 0;
+      _worstMoveGapMs  = 0;
+      _cellRebuilds    = 0;
+      _slowFrames      = 0;
+      _worstBuildMs    = 0;
+      _worstRasterMs   = 0;
     });
   }
 
-  // ── Horizontal sync (header ↔ body) ─────────────────────────────────────────
-  void _syncHTo(double v) {
-    if (_syncingH) return;
-    _syncingH = true;
-    for (final c in [_hScroll, _hScrollEmp]) {
-      if (c.hasClients) c.jumpTo(v.clamp(0.0, c.position.maxScrollExtent));
+  void _onFrameTimings(List<FrameTiming> timings) {
+    for (final t in timings) {
+      final buildMs  = t.buildDuration.inMicroseconds  / 1000.0;
+      final rasterMs = t.rasterDuration.inMicroseconds / 1000.0;
+      if (buildMs + rasterMs > 16.0) _slowFrames++;
+      if (buildMs  > _worstBuildMs)  _worstBuildMs  = buildMs;
+      if (rasterMs > _worstRasterMs) _worstRasterMs = rasterMs;
     }
-    _syncingH = false;
   }
 
-  void _onHScrollChange()    { _hChangeEvents++; _syncHTo(_hScroll.offset); }
-  void _onHScrollEmpChange() { _syncHTo(_hScrollEmp.offset); }
+  void _onPointerMoveProbe(PointerMoveEvent event) {
+    _pointerMoves++;
+    final now = DateTime.now();
+    if (_lastMoveAt != null) {
+      final gap = now.difference(_lastMoveAt!).inMilliseconds;
+      if (gap > _worstMoveGapMs) _worstMoveGapMs = gap;
+    }
+    _lastMoveAt = now;
+  }
 
-  // ── Vertical sync (date column → employee column) ────────────────────────────
+  // ── Horizontal scroll (single controller drives body; header reads it
+  //    directly via Transform in the widget tree — no sync needed) ──────────
+  void _syncHTo(double v) {
+    if (!_hScrollEmp.hasClients) return;
+    _hScrollEmp.jumpTo(v.clamp(0.0, _hScrollEmp.position.maxScrollExtent));
+  }
+
+  void _onHScrollEmpChange() { _hChangeEvents++; }
+
+  // ── Vertical sync (bidirectional: date column ↔ employee column) ────────────
   void _onVScrollChange() {
+    _vChangeEvents++;
     if (_syncingV) return;
     if (_vScroll2.hasClients) {
       _syncingV = true;
       _vScroll2.jumpTo(
           _vScroll.offset.clamp(0.0, _vScroll2.position.maxScrollExtent));
+      _syncingV = false;
+    }
+  }
+
+  void _onVScroll2Change() {
+    _v2ChangeEvents++;
+    if (_syncingV) return;
+    if (_vScroll.hasClients) {
+      _syncingV = true;
+      _vScroll.jumpTo(
+          _vScroll2.offset.clamp(0.0, _vScroll.position.maxScrollExtent));
       _syncingV = false;
     }
   }
@@ -550,13 +618,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     for (final c in _dateCtrl)           { c.dispose(); }
     for (final f in _dateFocus)          { f.dispose(); }
     _tableFocusNode.dispose();
-    _hScroll.removeListener(_onHScrollChange);
     _hScrollEmp.removeListener(_onHScrollEmpChange);
-    // _hScrollBar listener already removed
     _vScroll.removeListener(_onVScrollChange);
-    _hScroll.dispose();
+    _vScroll2.removeListener(_onVScroll2Change);
+    SchedulerBinding.instance.removeTimingsCallback(_onFrameTimings);
     _hScrollEmp.dispose();
-    _hScrollBar.dispose();
     _vScroll.dispose();
     _vScroll2.dispose();
     super.dispose();
@@ -787,7 +853,15 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           const SizedBox(width: 12),
           // ── Month navigator + import button (scrollable on narrow screens) ──
           Expanded(
-            child: SingleChildScrollView(
+            child: ScrollConfiguration(
+              behavior: ScrollConfiguration.of(context).copyWith(
+                dragDevices: {
+                  PointerDeviceKind.touch,
+                  PointerDeviceKind.mouse,
+                  PointerDeviceKind.trackpad,
+                },
+              ),
+              child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               reverse: true,
               child: Row(
@@ -828,6 +902,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                         ),
                 ],
               ),
+            ),
             ),
           ),
         ],
@@ -971,28 +1046,40 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   ),
                 ),
               ),
-              // Scrollable employee name headers — driven only via _hScroll.jumpTo
+              // Employee name headers — driven directly by the body's
+              // _hScrollEmp via a Transform (no second controller, no sync).
               Expanded(
-                child: SingleChildScrollView(
-                  controller: _hScroll,
-                  scrollDirection: Axis.horizontal,
-                  physics: const NeverScrollableScrollPhysics(),
-                  child: SizedBox(
-                    width: totalEmpW,
-                    child: Row(
-                      children: _employees.map((e) => SizedBox(
-                        width: colWidth,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          child: Text(e,
-                              style: const TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.white,
-                                  letterSpacing: 0.5),
-                              overflow: TextOverflow.ellipsis),
-                        ),
-                      )).toList(),
+                child: ClipRect(
+                  child: AnimatedBuilder(
+                    animation: _hScrollEmp,
+                    builder: (_, child) {
+                      final off = _hScrollEmp.hasClients ? _hScrollEmp.offset : 0.0;
+                      return Transform.translate(
+                        offset: Offset(-off, 0),
+                        child: child,
+                      );
+                    },
+                    child: OverflowBox(
+                      alignment: Alignment.topLeft,
+                      maxWidth: double.infinity,
+                      child: SizedBox(
+                      width: totalEmpW,
+                      child: Row(
+                        children: _employees.map((e) => SizedBox(
+                          width: colWidth,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            child: Text(e,
+                                style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white,
+                                    letterSpacing: 0.5),
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                        )).toList(),
+                      ),
+                    ),
                     ),
                   ),
                 ),
@@ -1002,28 +1089,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         ),
 
         // ── Body: fixed date column LEFT | scrollable employee cells RIGHT ──
-        // Listener wraps both columns so scroll works everywhere.
-        // Normal wheel → vertical, Shift+wheel → horizontal.
+        // ListViews are natively scrollable. Listener kept only for right-click+wheel
+        // → horizontal scroll (no native equivalent) and pointer-move probe.
         Expanded(
-          child: GestureDetector(
-            // Touch-drag support (mobile web) — PointerScrollEvent doesn't fire
-            // for touch gestures, so we handle vertical drag explicitly.
-            // onVerticalDragUpdate only fires for primarily-vertical gestures,
-            // leaving horizontal swipes for the native SingleChildScrollView below.
-            onVerticalDragUpdate: (details) {
-              if (_vScroll.hasClients) {
-                _vScroll.jumpTo(
-                  (_vScroll.offset - details.delta.dy)
-                      .clamp(0.0, _vScroll.position.maxScrollExtent),
-                );
-              }
-            },
-            child: Listener(
+          child: Listener(
             onPointerDown: (event) {
               if (event.buttons & kSecondaryMouseButton != 0) {
                 _rightButtonHeld = true;
               }
+              _lastMoveAt = null;
             },
+            onPointerMove: _onPointerMoveProbe,
             onPointerUp: (event) {
               _rightButtonHeld = false;
             },
@@ -1032,19 +1108,27 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             },
             onPointerSignal: (event) {
               if (event is PointerScrollEvent) {
-                // Right-click held + scroll → horizontal scroll
-                if (_rightButtonHeld && _hScrollEmp.hasClients) {
-                  _syncHTo(
-                    (_hScrollEmp.offset + event.scrollDelta.dy)
-                        .clamp(0.0, _hScrollEmp.position.maxScrollExtent),
-                  );
+                _pointerEvents++;
+                final forceHorizontal = _rightButtonHeld || _isShiftHeld(event);
+                final hasVScroll = _vScroll.hasClients &&
+                    _vScroll.position.maxScrollExtent > 0;
+                final hasHScroll = _hScrollEmp.hasClients &&
+                    _hScrollEmp.position.maxScrollExtent > 0;
+
+                // Wheel routing:
+                //   Shift or right-click held  → always horizontal
+                //   Otherwise: vertical if scrollable, else horizontal
+                if (forceHorizontal ||
+                    (!hasVScroll && hasHScroll && event.scrollDelta.dy != 0)) {
+                  if (hasHScroll) {
+                    _syncHTo(
+                      (_hScrollEmp.offset + event.scrollDelta.dy)
+                          .clamp(0.0, _hScrollEmp.position.maxScrollExtent),
+                    );
+                  }
                   return;
                 }
-                // Normal wheel (no horizontal delta) → vertical scroll
-                if (event.scrollDelta.dx == 0 &&
-                    event.scrollDelta.dy != 0 &&
-                    !_isShiftHeld(event) &&
-                    _vScroll.hasClients) {
+                if (hasVScroll && event.scrollDelta.dy != 0) {
                   _vScroll.jumpTo(
                     (_vScroll.offset + event.scrollDelta.dy)
                         .clamp(0.0, _vScroll.position.maxScrollExtent),
@@ -1063,11 +1147,12 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                     physics: const NeverScrollableScrollPhysics(),
                     itemCount: _rows.length,
                     itemExtent: rowH,
+                    cacheExtent: 3000, // pre-build all rows — tiny dataset
                   itemBuilder: (_, i) {
                     final row = _rows[i];
                     final isHoliday = _employees.every(
                         (e) => _isHoliday(row[e] ?? ''));
-                    return GestureDetector(
+                    return RepaintBoundary(child: GestureDetector(
                       onDoubleTap: i == _rows.length - 1
                           ? () => _addRow(focusAfter: true)
                           : null,
@@ -1102,7 +1187,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                           width: dateWidth,
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 8),
-                            child: TextField(
+                            child: _FocusableTextCell(
                               controller: _dateCtrl[i],
                               focusNode: _dateFocus[i],
                               onChanged: (v) {
@@ -1114,51 +1199,62 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                                   fontSize: 12,
                                   color: _kPrimary,
                                   fontWeight: FontWeight.w600),
-                              decoration: const InputDecoration(
-                                border: InputBorder.none,
-                                isDense: true,
-                                contentPadding: EdgeInsets.symmetric(vertical: 8),
-                              ),
                             ),
                           ),
                         ),
                       ]),
                     ),
-                    );
+                    ));
                   },
                 ),
               ),
 
-              // RIGHT: employee cells — h-scroll via SingleChildScrollView,
-              // v-scroll synced from _vScroll via _onVScrollChange.
-              // ScrollConfiguration enables native touch drag for horizontal scroll.
+              // RIGHT: employee cells. The horizontal SingleChildScrollView is
+              // kept (so _hScrollEmp.position exists and the inner SizedBox gets
+              // unbounded width), but its gesture recognizer is disabled via
+              // NeverScrollableScrollPhysics. An explicit GestureDetector drives
+              // the controller — this is the only horizontal recognizer in the
+              // arena, so it never competes with the inner ListView's vertical.
               Expanded(
-                child: ScrollConfiguration(
-                  behavior: ScrollConfiguration.of(context).copyWith(
-                    dragDevices: {
-                      PointerDeviceKind.touch,
-                      PointerDeviceKind.mouse,
-                      PointerDeviceKind.trackpad,
-                    },
-                  ),
-                  child: Scrollbar(
-                  controller: _hScrollEmp,
-                  thumbVisibility: true,
-                  notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanUpdate: (details) {
+                    // Single recognizer drives BOTH axes — no arena competition.
+                    // dx → horizontal, dy → vertical (drives _vScroll, which
+                    // syncs _vScroll2 via the existing listener).
+                    if (_hScrollEmp.hasClients && details.delta.dx != 0) {
+                      _hScrollEmp.jumpTo(
+                        (_hScrollEmp.offset - details.delta.dx).clamp(
+                          0.0,
+                          _hScrollEmp.position.maxScrollExtent,
+                        ),
+                      );
+                    }
+                    if (_vScroll.hasClients && details.delta.dy != 0) {
+                      _vScroll.jumpTo(
+                        (_vScroll.offset - details.delta.dy).clamp(
+                          0.0,
+                          _vScroll.position.maxScrollExtent,
+                        ),
+                      );
+                    }
+                  },
                   child: SingleChildScrollView(
                     controller: _hScrollEmp,
                     scrollDirection: Axis.horizontal,
+                    physics: const NeverScrollableScrollPhysics(),
                     child: SizedBox(
                       width: totalEmpW,
                       child: ListView.builder(
                         controller: _vScroll2,
-                        // NeverScrollable: driven only by _vScroll2.jumpTo (synced from _vScroll).
                         physics: const NeverScrollableScrollPhysics(),
                         itemCount: _rows.length,
                         itemExtent: rowH,
+                        cacheExtent: 3000, // pre-build all rows — tiny dataset
                         itemBuilder: (_, i) {
+                          _cellRebuilds++;
                           final row = _rows[i];
-                          return SizedBox(
+                          return RepaintBoundary(child: SizedBox(
                             height: rowH,
                             child: Row(
                               children: _employees.map((emp) {
@@ -1200,10 +1296,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                                     }
                                     _scheduleAnalysisUpdate();
                                   } : null,
-                                  child: TextField(
+                                  child: _FocusableTextCell(
                                     controller: _controllers['${i}_$emp']!,
-                                    focusNode:  _focusNodes['${i}_$emp'],
-                                    readOnly: !canEdit,
+                                    focusNode:  _focusNodes['${i}_$emp']!,
+                                    readOnly:   !canEdit,
                                     onChanged: canEdit ? (v) {
                                       if (_checkAsdf(v, _controllers['${i}_$emp']!, row, emp)) return;
                                       row[emp] = v;
@@ -1215,31 +1311,132 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                                           ? Colors.orange[800]
                                           : Colors.grey[800],
                                     ),
-                                    decoration: const InputDecoration(
-                                      border: InputBorder.none,
-                                      isDense: true,
-                                      contentPadding: EdgeInsets.symmetric(vertical: 8),
-                                    ),
                                   ),
                                 );
                               }).toList(),
                             ),
-                          );
+                          ));
                         },
                       ),
                     ),
                   ),
-                ),
-                ),
+                  ),
                 ),
               ],
             ),
-          ),
           ),
         ),
 
         // Old bottom scrollbar removed — Scrollbar now wraps the body directly.
       ],
+    );
+  }
+}
+
+// ─── Lightweight cell editor: shows Text when not focused, TextField when focused.
+//    TextField is one of the heaviest leaf widgets in Flutter — replacing it
+//    with a Text widget for the (very common) non-focused case dramatically
+//    reduces build/layout cost during scroll.
+
+class _FocusableTextCell extends StatefulWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final TextStyle? style;
+  final bool readOnly;
+  final ValueChanged<String>? onChanged;
+
+  const _FocusableTextCell({
+    required this.controller,
+    required this.focusNode,
+    this.style,
+    this.readOnly = false,
+    this.onChanged,
+  });
+
+  @override
+  State<_FocusableTextCell> createState() => _FocusableTextCellState();
+}
+
+class _FocusableTextCellState extends State<_FocusableTextCell> {
+  late bool _editing;
+
+  @override
+  void initState() {
+    super.initState();
+    _editing = widget.focusNode.hasFocus;
+    widget.focusNode.addListener(_onFocusChange);
+    widget.controller.addListener(_onTextChange);
+  }
+
+  @override
+  void dispose() {
+    widget.focusNode.removeListener(_onFocusChange);
+    widget.controller.removeListener(_onTextChange);
+    super.dispose();
+  }
+
+  void _onFocusChange() {
+    if (!mounted) return;
+    final hasFocus = widget.focusNode.hasFocus;
+    if (_editing != hasFocus) setState(() => _editing = hasFocus);
+  }
+
+  void _onTextChange() {
+    // Only need to rebuild the Text view when not editing — TextField
+    // updates itself when focused.
+    if (!mounted || _editing) return;
+    setState(() {});
+  }
+
+  void _enterEdit() {
+    if (widget.readOnly) return;
+    setState(() => _editing = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.focusNode.requestFocus();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_editing) {
+      return TextField(
+        controller: widget.controller,
+        focusNode:  widget.focusNode,
+        readOnly:   widget.readOnly,
+        onChanged:  widget.onChanged,
+        style:      widget.style,
+        decoration: const InputDecoration(
+          border: InputBorder.none,
+          isDense: true,
+          contentPadding: EdgeInsets.symmetric(vertical: 8),
+        ),
+      );
+    }
+    // Non-editing path: a Focus widget keeps the FocusNode attached so
+    // external requestFocus (e.g. Tab navigation) works, plus a Text widget
+    // displaying the current controller value. SizedBox.expand makes the
+    // tap target span the full cell — without it, an empty cell has zero
+    // hit area because Text("") is zero-sized.
+    return Focus(
+      focusNode: widget.focusNode,
+      canRequestFocus: !widget.readOnly,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.readOnly ? null : _enterEdit,
+        child: SizedBox.expand(
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                widget.controller.text,
+                style: widget.style,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1289,55 +1486,62 @@ class _TimeCellWithHoverClearState extends State<_TimeCellWithHoverClear> {
   Widget build(BuildContext context) {
     final loginClr  = _halfColor(widget.loginHour);
     final logoutClr = _halfColor(widget.logoutHour);
+    // MouseRegion is expensive on drag-scroll (fires enter/exit + setState on
+    // every cell the pointer passes over). Only attach it on wide screens where
+    // the hover-to-clear UX makes sense; on mobile hover never triggers anyway.
+    final isWide = MediaQuery.of(context).size.width >= 700;
 
+    final inner = GestureDetector(
+      onDoubleTap: widget.onDoubleTap,
+      child: Container(
+        width: widget.width,
+        color: widget.bg,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Stack(
+          alignment: Alignment.centerRight,
+          children: [
+            widget.child,
+            // AM/PM indicator — thin bar pinned to the bottom of the cell
+            if (loginClr != null || logoutClr != null)
+              Positioned(
+                left: 0, right: 0, bottom: 0,
+                child: Row(children: [
+                  Expanded(
+                    child: Container(
+                      height: 3,
+                      color: loginClr ?? Colors.transparent,
+                    ),
+                  ),
+                  Expanded(
+                    child: Container(
+                      height: 3,
+                      color: logoutClr ?? Colors.transparent,
+                    ),
+                  ),
+                ]),
+              ),
+            if (isWide && _hovered && widget.hasValue && widget.onClear != null)
+              GestureDetector(
+                onTap: widget.onClear,
+                child: Container(
+                  width: 18, height: 18,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.close, size: 11, color: Colors.black54),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+
+    if (!isWide) return inner;
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit:  (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        onDoubleTap: widget.onDoubleTap,
-        child: Container(
-          width: widget.width,
-          color: widget.bg,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Stack(
-            alignment: Alignment.centerRight,
-            children: [
-              widget.child,
-              // AM/PM indicator — thin bar pinned to the bottom of the cell
-              if (loginClr != null || logoutClr != null)
-                Positioned(
-                  left: 0, right: 0, bottom: 0,
-                  child: Row(children: [
-                    Expanded(
-                      child: Container(
-                        height: 3,
-                        color: loginClr ?? Colors.transparent,
-                      ),
-                    ),
-                    Expanded(
-                      child: Container(
-                        height: 3,
-                        color: logoutClr ?? Colors.transparent,
-                      ),
-                    ),
-                  ]),
-                ),
-              if (_hovered && widget.hasValue && widget.onClear != null)
-                GestureDetector(
-                  onTap: widget.onClear,
-                  child: Container(
-                    width: 18, height: 18,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[300],
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.close, size: 11, color: Colors.black54),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
+      child: inner,
     );
   }
 }
