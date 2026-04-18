@@ -204,6 +204,14 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   // Track right mouse button state for horizontal scroll gesture.
   bool _rightButtonHeld = false;
 
+  // Direction lock for the pan gesture. null = not yet decided; once dominant
+  // axis is determined, only that axis scrolls for the rest of the gesture.
+  // Reset on onPanStart / onPanEnd / onPanCancel.
+  Axis? _panLockedAxis;
+  double _panAccumDx = 0;
+  double _panAccumDy = 0;
+  static const double _kPanLockThreshold = 6.0;
+
   @override
   void initState() {
     super.initState();
@@ -930,6 +938,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
             ),
             Expanded(
               child: TabBarView(
+                physics: const NeverScrollableScrollPhysics(),
                 children: [
                   _buildTableWithHScroll(),
                   Container(
@@ -1218,25 +1227,46 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
               Expanded(
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
+                  onPanStart: (_) {
+                    _panLockedAxis = null;
+                    _panAccumDx = 0;
+                    _panAccumDy = 0;
+                  },
+                  onPanEnd:    (_) { _panLockedAxis = null; },
+                  onPanCancel: ()  { _panLockedAxis = null; },
                   onPanUpdate: (details) {
-                    // Single recognizer drives BOTH axes — no arena competition.
-                    // dx → horizontal, dy → vertical (drives _vScroll, which
-                    // syncs _vScroll2 via the existing listener).
-                    if (_hScrollEmp.hasClients && details.delta.dx != 0) {
-                      _hScrollEmp.jumpTo(
-                        (_hScrollEmp.offset - details.delta.dx).clamp(
-                          0.0,
-                          _hScrollEmp.position.maxScrollExtent,
-                        ),
-                      );
+                    // Until the dominant axis is decided, accumulate movement.
+                    // Once total displacement on either axis exceeds the
+                    // threshold, lock to whichever is larger and ignore the
+                    // perpendicular axis for the rest of the gesture.
+                    if (_panLockedAxis == null) {
+                      _panAccumDx += details.delta.dx;
+                      _panAccumDy += details.delta.dy;
+                      final ax = _panAccumDx.abs();
+                      final ay = _panAccumDy.abs();
+                      if (ax < _kPanLockThreshold && ay < _kPanLockThreshold) {
+                        return; // wait for more movement
+                      }
+                      _panLockedAxis = ax >= ay ? Axis.horizontal : Axis.vertical;
                     }
-                    if (_vScroll.hasClients && details.delta.dy != 0) {
-                      _vScroll.jumpTo(
-                        (_vScroll.offset - details.delta.dy).clamp(
-                          0.0,
-                          _vScroll.position.maxScrollExtent,
-                        ),
-                      );
+                    if (_panLockedAxis == Axis.horizontal) {
+                      if (_hScrollEmp.hasClients && details.delta.dx != 0) {
+                        _hScrollEmp.jumpTo(
+                          (_hScrollEmp.offset - details.delta.dx).clamp(
+                            0.0,
+                            _hScrollEmp.position.maxScrollExtent,
+                          ),
+                        );
+                      }
+                    } else {
+                      if (_vScroll.hasClients && details.delta.dy != 0) {
+                        _vScroll.jumpTo(
+                          (_vScroll.offset - details.delta.dy).clamp(
+                            0.0,
+                            _vScroll.position.maxScrollExtent,
+                          ),
+                        );
+                      }
                     }
                   },
                   child: SingleChildScrollView(
