@@ -78,6 +78,7 @@ class TaskItem extends AppFlowyGroupItem {
   String?  columnGroup;
   String?  createdBy;   // UUID of creator — used to gate "Move to Idea"
   DateTime? createdAt;
+  bool     isPinned;
   int      sortOrder;
   // Pause/drift fields
   bool     isPaused;
@@ -111,6 +112,7 @@ class TaskItem extends AppFlowyGroupItem {
     this.columnGroup,
     this.createdBy,
     this.createdAt,
+    this.isPinned    = false,
     this.sortOrder   = 0,
     this.isPaused            = false,
     this.pendingPauseRequest,
@@ -185,6 +187,7 @@ class TaskItem extends AppFlowyGroupItem {
       columnGroup:  json['column_group'] as String?,
       createdBy:    json['created_by'] as String?,
       createdAt:    json['created_at'] != null ? DateTime.tryParse(json['created_at'] as String) : null,
+      isPinned:     json['is_pinned'] as bool? ?? false,
       sortOrder:    json['sort_order'] as int? ?? 0,
       isPaused:            json['is_paused'] as bool? ?? false,
       pendingPauseRequest: json['pending_pause_request'] as Map<String, dynamic>?,
@@ -249,10 +252,8 @@ class _TasksScreenState extends State<TasksScreen> {
   final Map<String, Map<String, dynamic>> _pendingTaskUpdates = {};
   bool _loadingTasks = true;
 
-  // Cached tasks for local operations (pin) without extra API calls
+  // Cached tasks for local operations without extra API calls
   List<TaskItem> _loadedTasks = [];
-  // IDs of pinned tasks — pinned tasks float to top of each column
-  final Set<String> _pinnedIds = {};
 
   // Users loaded from API (for assignee / reviewer dropdowns in new task dialog)
   List<Map<String, dynamic>> _users = [];
@@ -532,8 +533,8 @@ class _TasksScreenState extends State<TasksScreen> {
     int pinSort(AppFlowyGroupItem a, AppFlowyGroupItem b) {
       final ta = a as TaskItem;
       final tb = b as TaskItem;
-      final ap = _pinnedIds.contains(ta.backendId) ? 0 : 1;
-      final bp = _pinnedIds.contains(tb.backendId) ? 0 : 1;
+      final ap = ta.isPinned ? 0 : 1;
+      final bp = tb.isPinned ? 0 : 1;
       if (ap != bp) return ap.compareTo(bp);
       return ta.sortOrder.compareTo(tb.sortOrder);
     }
@@ -552,15 +553,20 @@ class _TasksScreenState extends State<TasksScreen> {
     _boardCtrl.addGroup(AppFlowyGroupData(id: 'idea',        name: 'Ideas',       items: ideaItems));
   }
 
-  void _togglePin(String taskId) {
-    setState(() {
-      if (_pinnedIds.contains(taskId)) {
-        _pinnedIds.remove(taskId);
-      } else {
-        _pinnedIds.add(taskId);
-      }
-    });
+  void _togglePin(TaskItem item) {
+    final id = item.backendId;
+    if (id == null) return;
+    final nowPinned = !item.isPinned;
+    setState(() => item.isPinned = nowPinned);
     _rebuildBoard(_loadedTasks);
+    () async {
+      try {
+        await (nowPinned ? _api.pinTask(id) : _api.unpinTask(id));
+      } catch (_) {
+        setState(() => item.isPinned = !nowPinned);
+        _rebuildBoard(_loadedTasks);
+      }
+    }();
   }
 
   /// Called when a card is dragged to a different column
@@ -775,9 +781,9 @@ class _TasksScreenState extends State<TasksScreen> {
                     _TaskCard(
                       item:        item,
                       isSelected:  _selectedIds.contains(cardId),
-                      isPinned:    _pinnedIds.contains(cardId),
+                      isPinned:    item.isPinned,
                       onTap:       () => _toggleCard(cardId),
-                      onPinToggle: () => _togglePin(cardId),
+                      onPinToggle: () => _togglePin(item),
                     ),
                     Positioned(
                       top: 8, right: 8,
@@ -807,9 +813,9 @@ class _TasksScreenState extends State<TasksScreen> {
               child: _TaskCard(
                 item:        item,
                 isSelected:  _selectedTask?.id == item.id,
-                isPinned:    _pinnedIds.contains(item.backendId ?? item.id),
+                isPinned:    item.isPinned,
                 onTap:       () => _showTaskDetailModal(item),
-                onPinToggle: () => _togglePin(item.backendId ?? item.id),
+                onPinToggle: () => _togglePin(item),
               ),
             );
           },
@@ -896,14 +902,13 @@ class _TasksScreenState extends State<TasksScreen> {
                         padding: const EdgeInsets.only(bottom: 8),
                         itemCount: group.items.length,
                         itemBuilder: (_, i) {
-                          final item   = group.items[i] as TaskItem;
-                          final cardId = item.backendId ?? item.id;
+                          final item = group.items[i] as TaskItem;
                           return _TaskCard(
                             item:        item,
                             isSelected:  _selectedTask?.id == item.id,
-                            isPinned:    _pinnedIds.contains(cardId),
+                            isPinned:    item.isPinned,
                             onTap:       () => _showTaskDetailModal(item),
-                            onPinToggle: () => _togglePin(cardId),
+                            onPinToggle: () => _togglePin(item),
                           );
                         },
                       ),

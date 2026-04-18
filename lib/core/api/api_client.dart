@@ -136,6 +136,14 @@ class ApiClient {
     return dio.put('/tasks/$id', data: data);
   }
 
+  Future<Response> pinTask(String id) {
+    return dio.post('/tasks/$id/pin');
+  }
+
+  Future<Response> unpinTask(String id) {
+    return dio.delete('/tasks/$id/pin');
+  }
+
   Future<Response> deleteTask(String id) {
     return dio.delete('/tasks/$id');
   }
