@@ -342,6 +342,8 @@ class _ChatScreenState extends State<ChatScreen> {
   // Socket subscriptions
   StreamSubscription<Map<String, dynamic>>? _newMsgSub;
   StreamSubscription<Map<String, dynamic>>? _reviewUpdatedSub;
+  StreamSubscription<Map<String, dynamic>>? _conversationReadSub;
+  StreamSubscription<Map<String, dynamic>>? _messagesReadSub;
   StreamSubscription<Set<String>>?          _onlineUsersSub;
 
   ApiClient       get _api    => context.read<ApiClient>();
@@ -366,8 +368,32 @@ class _ChatScreenState extends State<ChatScreen> {
   void _subscribeSocket() {
     _newMsgSub        = _socket.onNewMessage.listen(_onSocketNewMessage);
     _reviewUpdatedSub = _socket.onReviewUpdated.listen(_onSocketReviewUpdated);
+    _conversationReadSub = _socket.onConversationRead.listen(_onConversationRead);
+    _messagesReadSub     = _socket.onMessagesRead.listen(_onMessagesRead);
     // Rebuild contact list when presence changes so dots update live.
     _onlineUsersSub   = _socket.onOnlineUsers.listen((_) { if (mounted) setState(() {}); });
+  }
+
+  void _onConversationRead(Map<String, dynamic> data) {
+    final convId = data['conversation_id'] as String?;
+    final unreadCount = data['unread_count'] as int?;
+    if (convId == null || !mounted) return;
+    
+    // Update the unread count for this conversation
+    setState(() {
+      if (unreadCount != null && unreadCount == 0) {
+        _unreadByConv.remove(convId);
+      } else if (unreadCount != null) {
+        _unreadByConv[convId] = unreadCount;
+      }
+    });
+  }
+
+  void _onMessagesRead(Map<String, dynamic> data) {
+    // This event is for showing read ticks on sent messages
+    // We'll implement this when we add read receipts UI
+    if (!mounted) return;
+    setState(() {});
   }
 
   void _onSocketNewMessage(Map<String, dynamic> data) {
@@ -485,8 +511,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _markConversationAsRead(String convId) async {
     try {
       await _api.markConversationAsRead(convId);
-      // Reload conversations to get updated unread counts
-      _loadConversations();
+      // No need to reload - socket 'conversation_read' event will update the badge
     } catch (e) {
       // Silent fail - not critical for UX
       debugPrint('Failed to mark conversation as read: $e');
@@ -497,6 +522,8 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _newMsgSub?.cancel();
     _reviewUpdatedSub?.cancel();
+    _conversationReadSub?.cancel();
+    _messagesReadSub?.cancel();
     _onlineUsersSub?.cancel();
     if (_selectedId.isNotEmpty) _socket.leaveConversation(_selectedId);
     _msgCtrl.dispose();
@@ -1043,7 +1070,12 @@ class _ChatScreenState extends State<ChatScreen> {
           if (showBack) ...[
             IconButton(
               icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18),
-              onPressed: () => setState(() => _selectedId = ''),
+              onPressed: () {
+                if (_selectedId.isNotEmpty) {
+                  _socket.leaveConversation(_selectedId);
+                }
+                setState(() => _selectedId = '');
+              },
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
               visualDensity: VisualDensity.compact,

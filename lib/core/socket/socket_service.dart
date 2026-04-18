@@ -9,6 +9,8 @@ class SocketService {
   final _newMessageCtrl    = StreamController<Map<String, dynamic>>.broadcast();
   final _reviewUpdatedCtrl = StreamController<Map<String, dynamic>>.broadcast();
   final _notificationCtrl  = StreamController<Map<String, dynamic>>.broadcast();
+  final _conversationReadCtrl = StreamController<Map<String, dynamic>>.broadcast();
+  final _messagesReadCtrl     = StreamController<Map<String, dynamic>>.broadcast();
   final _unreadCountCtrl   = StreamController<int>.broadcast();
   final _onlineUsersCtrl   = StreamController<Set<String>>.broadcast();
   // Task board events
@@ -17,11 +19,13 @@ class SocketService {
   final _taskDeletedCtrl       = StreamController<Map<String, dynamic>>.broadcast();
   final _taskStatusChangedCtrl = StreamController<Map<String, dynamic>>.broadcast();
 
-  Stream<Map<String, dynamic>> get onNewMessage    => _newMessageCtrl.stream;
-  Stream<Map<String, dynamic>> get onReviewUpdated => _reviewUpdatedCtrl.stream;
-  Stream<Map<String, dynamic>> get onNotification  => _notificationCtrl.stream;
-  Stream<int>                  get onUnreadCount   => _unreadCountCtrl.stream;
-  Stream<Set<String>>          get onOnlineUsers   => _onlineUsersCtrl.stream;
+  Stream<Map<String, dynamic>> get onNewMessage       => _newMessageCtrl.stream;
+  Stream<Map<String, dynamic>> get onReviewUpdated    => _reviewUpdatedCtrl.stream;
+  Stream<Map<String, dynamic>> get onNotification     => _notificationCtrl.stream;
+  Stream<Map<String, dynamic>> get onConversationRead => _conversationReadCtrl.stream;
+  Stream<Map<String, dynamic>> get onMessagesRead     => _messagesReadCtrl.stream;
+  Stream<int>                  get onUnreadCount      => _unreadCountCtrl.stream;
+  Stream<Set<String>>          get onOnlineUsers      => _onlineUsersCtrl.stream;
   Stream<Map<String, dynamic>> get onTaskCreated       => _taskCreatedCtrl.stream;
   Stream<Map<String, dynamic>> get onTaskUpdated       => _taskUpdatedCtrl.stream;
   Stream<Map<String, dynamic>> get onTaskDeleted       => _taskDeletedCtrl.stream;
@@ -113,6 +117,16 @@ class SocketService {
       })
       ..on('task_status_changed', (data) {
         if (data is Map) _taskStatusChangedCtrl.add(Map<String, dynamic>.from(data));
+      })
+      ..on('conversation_read', (data) {
+        if (data is Map) {
+          _conversationReadCtrl.add(Map<String, dynamic>.from(data));
+        }
+      })
+      ..on('messages_read', (data) {
+        if (data is Map) {
+          _messagesReadCtrl.add(Map<String, dynamic>.from(data));
+        }
       });
 
     _socket!.connect();
@@ -146,6 +160,8 @@ class SocketService {
     _newMessageCtrl.close();
     _reviewUpdatedCtrl.close();
     _notificationCtrl.close();
+    _conversationReadCtrl.close();
+    _messagesReadCtrl.close();
     _unreadCountCtrl.close();
     _onlineUsersCtrl.close();
     _taskCreatedCtrl.close();
