@@ -347,7 +347,6 @@ class _DropdownPopupState extends State<_DropdownPopup> {
                 ],
               ),
               child: Column(
-                mainAxisSize:        MainAxisSize.min,
                 crossAxisAlignment:  CrossAxisAlignment.stretch,
                 children: [
                   // ── Search / create input ──────────────────────────────────

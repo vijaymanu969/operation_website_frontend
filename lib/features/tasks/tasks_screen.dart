@@ -2570,6 +2570,12 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   late final _titleCtrl   = TextEditingController(text: widget.item.title);
   late final _descCtrl    = TextEditingController(text: widget.item.description);
   final _commentCtrl      = TextEditingController();
+  // FocusNodes for title/description — save triggers on blur, not on every
+  // keystroke, so Shift+Enter (and ordinary typing) doesn't spam the API.
+  final _titleFocus = FocusNode();
+  final _descFocus  = FocusNode();
+  // Pending edits captured from onChanged; flushed on blur or dispose.
+  final Map<String, dynamic> _pendingEdits = {};
   final _dateRowKey       = GlobalKey();
   OverlayEntry? _dateOverlay;
   // Snapshot of date values taken when the picker opens — used to skip the
@@ -2577,7 +2583,6 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   DateTime? _pickerOpenDate;
   DateTime? _pickerOpenEndDate;
   bool _dateDirty = false;
-  Timer? _debounce;
   Timer? _personDebounce;
   Timer? _reviewerDebounce;
 
@@ -2615,7 +2620,21 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   void initState() {
     super.initState();
     _panelApi = context.read<ApiClient>();
+    _titleFocus.addListener(_flushOnBlur);
+    _descFocus.addListener(_flushOnBlur);
     _loadComments();
+  }
+
+  /// Called when title or description focus changes. If focus is LOST and we
+  /// have pending text edits, save them in one PUT. This replaces the old
+  /// keystroke-debounced save so that Shift+Enter / normal typing doesn't
+  /// spam the API or flood the activity feed.
+  void _flushOnBlur() {
+    if (_titleFocus.hasFocus || _descFocus.hasFocus) return;
+    if (_pendingEdits.isEmpty) return;
+    final data = Map<String, dynamic>.from(_pendingEdits);
+    _pendingEdits.clear();
+    _saveField(data);
   }
 
   Future<void> _loadComments() async {
@@ -2638,10 +2657,21 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
 
   @override
   void dispose() {
-    _debounce?.cancel();
     _personDebounce?.cancel();
     _reviewerDebounce?.cancel();
     _closeDateOverlay();
+    // Flush any pending title/description edits the user didn't blur away from.
+    if (_pendingEdits.isNotEmpty) {
+      final id = widget.item.backendId;
+      if (id != null) {
+        _panelApi.updateTask(id, Map<String, dynamic>.from(_pendingEdits));
+      }
+      _pendingEdits.clear();
+    }
+    _titleFocus.removeListener(_flushOnBlur);
+    _descFocus.removeListener(_flushOnBlur);
+    _titleFocus.dispose();
+    _descFocus.dispose();
     _titleCtrl.dispose();
     _descCtrl.dispose();
     _commentCtrl.dispose();
@@ -2690,12 +2720,6 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       item.pendingPauseRequest = fresh.pendingPauseRequest;
     });
     widget.onChanged();
-  }
-
-  // Save after 600 ms of inactivity (for text fields)
-  void _saveLater(Map<String, dynamic> data) {
-    _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 600), () => _saveField(data));
   }
 
   Future<void> _confirmDelete() async {
@@ -3222,7 +3246,6 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   Widget build(BuildContext context) {
     final item = widget.item;
     return Column(
-      mainAxisSize:        MainAxisSize.min,
       crossAxisAlignment:  CrossAxisAlignment.start,
       children: [
         // ── Header button row (delete only) ──────────────────────────────
@@ -3248,7 +3271,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
           ),
 
         // ── Body ────────────────────────────────────────────────────────────
-        Flexible(
+        Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
             child: Column(
@@ -3257,6 +3280,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                 // ── Title (editable, header size) ──────────────────────────
                 TextField(
                   controller: _titleCtrl,
+                  focusNode:  _titleFocus,
                   style:      const TextStyle(
                     fontSize:   20,
                     fontWeight: FontWeight.w700,
@@ -3273,7 +3297,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   onChanged: (v) {
                     item.title = v;
                     widget.onChanged();
-                    _saveLater({'title': v});
+                    _pendingEdits['title'] = v; // flushed on blur
                   },
                 ),
                 const SizedBox(height: 4),
@@ -3281,6 +3305,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                 // ── Description (editable, normal size) ────────────────────
                 TextField(
                   controller: _descCtrl,
+                  focusNode:  _descFocus,
                   maxLines:   null,
                   style:      const TextStyle(
                     fontSize: 13,
@@ -3297,7 +3322,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   onChanged: (v) {
                     item.description = v;
                     widget.onChanged();
-                    _saveLater({'description': v});
+                    _pendingEdits['description'] = v; // flushed on blur
                   },
                 ),
 
