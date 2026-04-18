@@ -4,7 +4,9 @@ import 'dart:ui' show ImageFilter;
 import 'dart:math' show min;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../core/api/api_client.dart';
 import '../../core/auth/auth_bloc.dart';
 import '../../core/auth/user_role.dart';
@@ -1242,21 +1244,33 @@ class _ChatScreenState extends State<ChatScreen> {
                             color: _avatarColor(msg.senderName!))),
                   ),
                 // Bubble — accent bg for sent, light gray for received
-                Container(
-                  constraints: const BoxConstraints(maxWidth: 400),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: isSent ? _kAccent : _kBg,
-                    borderRadius: BorderRadius.only(
-                      topLeft:     const Radius.circular(12),
-                      topRight:    const Radius.circular(12),
-                      bottomLeft:  Radius.circular(isSent ? 12 : 2),
-                      bottomRight: Radius.circular(isSent ? 2  : 12),
+                GestureDetector(
+                  onDoubleTap: () {
+                    Clipboard.setData(ClipboardData(text: msg.text ?? ''));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Message copied to clipboard'),
+                        duration: Duration(milliseconds: 1500),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  },
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 400),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: isSent ? _kAccent : _kBg,
+                      borderRadius: BorderRadius.only(
+                        topLeft:     const Radius.circular(12),
+                        topRight:    const Radius.circular(12),
+                        bottomLeft:  Radius.circular(isSent ? 12 : 2),
+                        bottomRight: Radius.circular(isSent ? 2  : 12),
+                      ),
+                      border: isSent ? null : Border.all(color: _kBorder),
                     ),
-                    border: isSent ? null : Border.all(color: _kBorder),
+                    child: _buildBubbleContent(msg.text ?? '', isSent),
                   ),
-                  child: _buildBubbleContent(msg.text ?? '', isSent),
                 ),
                 const SizedBox(height: 4),
                 // Timestamp
@@ -1339,9 +1353,93 @@ class _ChatScreenState extends State<ChatScreen> {
         // Not valid JSON — fall through to plain text
       }
     }
-    return Text(text,
+    
+    // Check if text contains URLs
+    return _buildTextWithLinks(text, isSent);
+  }
+
+  // Build text with clickable links
+  Widget _buildTextWithLinks(String text, bool isSent) {
+    // URL regex pattern
+    final urlPattern = RegExp(
+      r'https?://[^\s]+',
+      caseSensitive: false,
+    );
+    
+    final matches = urlPattern.allMatches(text);
+    
+    if (matches.isEmpty) {
+      // No links, return plain text
+      return Text(text,
+          style: TextStyle(
+              fontSize: 13, color: isSent ? Colors.white : _kPrimary));
+    }
+    
+    // Build text with clickable links
+    final spans = <InlineSpan>[];
+    int lastIndex = 0;
+    
+    for (final match in matches) {
+      // Add text before the link
+      if (match.start > lastIndex) {
+        spans.add(TextSpan(
+          text: text.substring(lastIndex, match.start),
+          style: TextStyle(
+              fontSize: 13, color: isSent ? Colors.white : _kPrimary),
+        ));
+      }
+      
+      // Add clickable link
+      final url = match.group(0)!;
+      spans.add(TextSpan(
+        text: url,
         style: TextStyle(
-            fontSize: 13, color: isSent ? Colors.white : _kPrimary));
+          fontSize: 13,
+          color: isSent ? Colors.white : const Color(0xFF0085FF),
+          decoration: TextDecoration.underline,
+          decorationColor: isSent ? Colors.white : const Color(0xFF0085FF),
+        ),
+        recognizer: TapGestureRecognizer()
+          ..onTap = () => _launchURL(url),
+      ));
+      
+      lastIndex = match.end;
+    }
+    
+    // Add remaining text after the last link
+    if (lastIndex < text.length) {
+      spans.add(TextSpan(
+        text: text.substring(lastIndex),
+        style: TextStyle(
+            fontSize: 13, color: isSent ? Colors.white : _kPrimary),
+      ));
+    }
+    
+    return RichText(
+      text: TextSpan(children: spans),
+    );
+  }
+
+  // Launch URL in browser
+  Future<void> _launchURL(String urlString) async {
+    try {
+      final uri = Uri.parse(urlString);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not open link: $urlString')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Invalid URL: $urlString')),
+        );
+      }
+    }
   }
 
   // Image message — thumbnail placeholder + caption + timestamp
