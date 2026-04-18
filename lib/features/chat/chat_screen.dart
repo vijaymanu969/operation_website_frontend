@@ -479,6 +479,18 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     _socket.joinConversation(convId);
     _loadMessages(convId);
+    _markConversationAsRead(convId);
+  }
+
+  Future<void> _markConversationAsRead(String convId) async {
+    try {
+      await _api.markConversationAsRead(convId);
+      // Reload conversations to get updated unread counts
+      _loadConversations();
+    } catch (e) {
+      // Silent fail - not critical for UX
+      debugPrint('Failed to mark conversation as read: $e');
+    }
   }
 
   @override
@@ -763,6 +775,12 @@ class _ChatScreenState extends State<ChatScreen> {
         : _Status.offline;
 
     final convId = conv['id'] as String;
+    
+    // Use backend's unread_count if available, otherwise use session-based tracking
+    final backendUnread = conv['unread_count'] as int?;
+    final sessionUnread = _unreadByConv[convId] ?? 0;
+    final unreadCount = backendUnread ?? sessionUnread;
+    
     return _Contact(
       id:          convId,
       name:        name,
@@ -772,7 +790,7 @@ class _ChatScreenState extends State<ChatScreen> {
       status:      status,
       lastSeen:    '',
       preview:     preview,
-      unreadCount: _unreadByConv[convId] ?? 0,
+      unreadCount: unreadCount,
     );
   }
 

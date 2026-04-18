@@ -347,6 +347,10 @@ class ApiClient {
     });
   }
 
+  Future<Response> markConversationAsRead(String conversationId) {
+    return dio.post('/chat/conversations/$conversationId/mark-read');
+  }
+
   Future<Response> deleteConversation(String conversationId) {
     return dio.delete('/chat/conversations/$conversationId');
   }
