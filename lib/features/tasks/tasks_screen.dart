@@ -77,6 +77,7 @@ class TaskItem extends AppFlowyGroupItem {
   bool     isDone;
   String?  columnGroup;
   String?  createdBy;   // UUID of creator — used to gate "Move to Idea"
+  DateTime? createdAt;
   int      sortOrder;
   // Pause/drift fields
   bool     isPaused;
@@ -109,6 +110,7 @@ class TaskItem extends AppFlowyGroupItem {
     this.isDone      = false,
     this.columnGroup,
     this.createdBy,
+    this.createdAt,
     this.sortOrder   = 0,
     this.isPaused            = false,
     this.pendingPauseRequest,
@@ -182,6 +184,7 @@ class TaskItem extends AppFlowyGroupItem {
       isDone:       status == 'completed',
       columnGroup:  json['column_group'] as String?,
       createdBy:    json['created_by'] as String?,
+      createdAt:    json['created_at'] != null ? DateTime.tryParse(json['created_at'] as String) : null,
       sortOrder:    json['sort_order'] as int? ?? 0,
       isPaused:            json['is_paused'] as bool? ?? false,
       pendingPauseRequest: json['pending_pause_request'] as Map<String, dynamic>?,
@@ -2428,6 +2431,18 @@ class _TaskCard extends StatelessWidget {
               ]),
             ],
 
+            // ── Created date row ─────────────────────────────────────────
+            if (item.createdAt != null) ...[
+              const SizedBox(height: 6),
+              Row(children: [
+                const Icon(Icons.access_time_rounded, size: 11, color: _kMuted),
+                const SizedBox(width: 4),
+                Text(
+                  'Created ${_fmtDate(item.createdAt!)}',
+                  style: const TextStyle(fontSize: 10, color: _kMuted),
+                ),
+              ]),
+            ],
             // ── Dates + comments row ─────────────────────────────────────
             const SizedBox(height: 6),
             Row(children: [
@@ -3181,7 +3196,25 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     }
   }
 
+  bool _canEditDates() {
+    final state = context.read<AuthBloc>().state;
+    if (state is! AuthAuthenticated) return false;
+    if (state.user.role == UserRole.superAdmin) return true;
+    final createdAt = widget.item.createdAt;
+    if (createdAt == null) return true; // unknown age — let backend decide
+    return DateTime.now().difference(createdAt).inHours < 24;
+  }
+
   void _openDateOverlay() {
+    if (!_canEditDates()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Task date can no longer be changed (24h window expired). Only super admin can change it.'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
     final item = widget.item;
     if (_dateOverlay != null) { _closeDateOverlay(); return; }
     // Snapshot the current dates so we can skip the save if nothing changes.
@@ -3232,10 +3265,29 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       if (dateChanged || endDateChanged) {
         final id = item.backendId;
         if (id != null) {
-          _panelApi.updateTask(id, {
-            'date':     item.date?.toIso8601String().substring(0, 10),
-            'end_date': item.endDate?.toIso8601String().substring(0, 10),
-          });
+          () async {
+            try {
+              await _panelApi.updateTask(id, {
+                'date':     item.date?.toIso8601String().substring(0, 10),
+                'end_date': item.endDate?.toIso8601String().substring(0, 10),
+              });
+            } on DioException catch (e) {
+              if (!mounted) return;
+              String msg = 'Failed to update date';
+              final data = e.response?.data;
+              if (data is Map && data['error'] is String) {
+                msg = data['error'] as String;
+              } else if (e.response?.statusCode == 403) {
+                msg = 'Task date can no longer be changed (24h window expired). Only super admin can change it.';
+              }
+              setState(() {
+                item.date    = _pickerOpenDate;
+                item.endDate = _pickerOpenEndDate;
+              });
+              widget.onChanged();
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+            }
+          }();
         }
       }
     }
@@ -3403,12 +3455,15 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                               color: item.date == null ? _kMuted : _kPrimary),
                         ),
                         const SizedBox(width: 4),
-                        Icon(
-                          _dateOverlay != null
-                              ? Icons.keyboard_arrow_up_rounded
-                              : Icons.keyboard_arrow_down_rounded,
-                          size: 14, color: _kMuted,
-                        ),
+                        if (!_canEditDates())
+                          const Icon(Icons.lock_outline_rounded, size: 13, color: _kMuted)
+                        else
+                          Icon(
+                            _dateOverlay != null
+                                ? Icons.keyboard_arrow_up_rounded
+                                : Icons.keyboard_arrow_down_rounded,
+                            size: 14, color: _kMuted,
+                          ),
                       ]),
                     ),
                   ),
