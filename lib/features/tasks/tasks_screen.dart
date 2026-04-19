@@ -1571,6 +1571,7 @@ class _TasksScreenState extends State<TasksScreen> {
                             }),
                             onEndSelect:    (d) => setDlg(() => selectedEndDate = d),
                             onEndDateClear: ()  => setDlg(() => selectedEndDate = null),
+                            onClearAll:     ()  => setDlg(() { selectedDate = null; selectedEndDate = null; }),
                           ),
                       ],
                     ),
@@ -3261,6 +3262,11 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
         widget.onChanged();
         _dateOverlay?.markNeedsBuild();
       },
+      onClearAll: () {
+        setState(() { item.date = null; item.endDate = null; _dateDirty = true; });
+        widget.onChanged();
+        _dateOverlay?.markNeedsBuild();
+      },
     ));
     Overlay.of(context).insert(_dateOverlay!);
     setState(() {}); // update arrow icon
@@ -4145,6 +4151,7 @@ class _DatePickerOverlay extends StatelessWidget {
   final ValueChanged<DateTime>  onSelect;
   final ValueChanged<DateTime>? onEndSelect;
   final VoidCallback?           onEndDateClear;
+  final VoidCallback?           onClearAll;
 
   const _DatePickerOverlay({
     required this.anchorPos,
@@ -4155,6 +4162,7 @@ class _DatePickerOverlay extends StatelessWidget {
     this.endDate,
     this.onEndSelect,
     this.onEndDateClear,
+    this.onClearAll,
   });
 
   @override
@@ -4211,6 +4219,7 @@ class _DatePickerOverlay extends StatelessWidget {
                 onSelect:       onSelect,
                 onEndSelect:    onEndSelect,
                 onEndDateClear: onEndDateClear,
+                onClearAll:     onClearAll,
               ),
             ),
           ),
@@ -4231,6 +4240,7 @@ class _InlineDatePicker extends StatefulWidget {
   final ValueChanged<DateTime>  onSelect;       // start date chosen
   final ValueChanged<DateTime>? onEndSelect;    // end date chosen
   final VoidCallback?           onEndDateClear; // end date tapped again → clear it
+  final VoidCallback?           onClearAll;     // start tapped when range exists → clear all
 
   const _InlineDatePicker({
     this.selected,
@@ -4238,6 +4248,7 @@ class _InlineDatePicker extends StatefulWidget {
     required this.onSelect,
     this.onEndSelect,
     this.onEndDateClear,
+    this.onClearAll,
   });
 
   @override
@@ -4400,21 +4411,43 @@ class _InlineDatePickerState extends State<_InlineDatePicker> {
                           d.month == today.month &&
                           d.day   == today.day;
 
-                      // Tap logic (no toggle needed):
+                      // Tap logic:
                       //  • No start → set start
-                      //  • Has start, no end, different date → set end
-                      //  • Has start, no end, same as start → do nothing (single-date locked)
-                      //  • Has end, tap end again → clear end
-                      //  • Has end, tap other date → set new end
+                      //  • Has start, no end, same as start → do nothing
+                      //  • Has start, no end, different date → set end (auto-sort so earlier = start)
+                      //  • Has end, tap start → reset to new start, clear end
+                      //  • Has end, tap end → clear end only
+                      //  • Has end, tap other → set new end (auto-sort)
                       void onTap() {
+                        debugPrint('[DatePicker] tap: ${d.day}  selected:${selected?.day}  end:${endDate?.day}  isStart:$isStart  isEnd:$isEnd');
                         if (selected == null) {
+                          debugPrint('[DatePicker] → set start');
                           widget.onSelect(d);
                         } else if (endDate == null) {
-                          if (!isStart) widget.onEndSelect?.call(d);
+                          if (isStart) { debugPrint('[DatePicker] → same as start, ignore'); return; }
+                          if (d.isBefore(selected)) {
+                            debugPrint('[DatePicker] → before start, swap: start=${d.day} end=${selected.day}');
+                            widget.onSelect(d);
+                            widget.onEndSelect?.call(selected);
+                          } else {
+                            debugPrint('[DatePicker] → set end: ${d.day}');
+                            widget.onEndSelect?.call(d);
+                          }
+                        } else if (isStart) {
+                          debugPrint('[DatePicker] → tap start with range, clear all');
+                          widget.onClearAll?.call();
                         } else if (isEnd) {
+                          debugPrint('[DatePicker] → tap end, clear end');
                           widget.onEndDateClear?.call();
                         } else {
-                          widget.onEndSelect?.call(d);
+                          if (d.isBefore(selected)) {
+                            debugPrint('[DatePicker] → before start in range, swap: start=${d.day} end=${selected.day}');
+                            widget.onSelect(d);
+                            widget.onEndSelect?.call(selected);
+                          } else {
+                            debugPrint('[DatePicker] → set new end: ${d.day}');
+                            widget.onEndSelect?.call(d);
+                          }
                         }
                       }
 
