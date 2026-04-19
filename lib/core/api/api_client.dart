@@ -355,6 +355,22 @@ class ApiClient {
     });
   }
 
+  Future<Response> uploadMessageFile(
+    String conversationId,
+    String filePath,
+    String fileName, {
+    String? content,
+  }) {
+    final formData = FormData.fromMap({
+      'file': MultipartFile.fromFileSync(filePath, filename: fileName),
+      if (content != null && content.isNotEmpty) 'content': content,
+    });
+    return dio.post(
+      '/chat/conversations/$conversationId/messages/upload',
+      data: formData,
+    );
+  }
+
   Future<Response> markConversationAsRead(String conversationId) {
     return dio.post('/chat/conversations/$conversationId/mark-read');
   }

@@ -1,12 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data' show ByteBuffer;
 import 'dart:ui' show ImageFilter;
 import 'dart:math' show min;
+// ignore: avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:dio/dio.dart' show DioException;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:file_picker/file_picker.dart';
 import '../../core/api/api_client.dart';
 import '../../core/auth/auth_bloc.dart';
 import '../../core/auth/user_role.dart';
@@ -49,6 +54,8 @@ class _Contact {
 class _Message {
   // When dateLabel is non-null the row renders as a date separator, not a bubble.
   final String?        dateLabel;
+  final String?        id;           // backend message ID — used for read-tick comparison
+  final String?        createdAtIso; // raw ISO from backend — compared against last_read_by
   final String?        text;
   final bool           sent;
   final String         time;
@@ -57,9 +64,16 @@ class _Message {
   final _ChatTask?     task;       // task_review card
   final _PauseRequest? pauseReq;  // pause_request card
   final _IdeaRequest?  ideaReq;   // idea_request card
+  // Attachment fields (from upload endpoint)
+  final String?        attachmentUrl;
+  final String?        attachmentType;
+  final String?        attachmentName;
+  final int?           attachmentSize;
 
   const _Message({
     this.dateLabel,
+    this.id,
+    this.createdAtIso,
     this.text,
     this.sent        = false,
     this.time        = '',
@@ -68,6 +82,10 @@ class _Message {
     this.task,
     this.pauseReq,
     this.ideaReq,
+    this.attachmentUrl,
+    this.attachmentType,
+    this.attachmentName,
+    this.attachmentSize,
   });
 }
 
@@ -339,6 +357,13 @@ class _ChatScreenState extends State<ChatScreen> {
   // Per-conversation unread count (tracked via socket within this session)
   final Map<String, int> _unreadByConv = {};
 
+  // last_read_by: maps other-user UUID → DateTime they last read up to
+  Map<String, DateTime> _lastReadBy = {};
+
+  bool _showScrollDown = false;
+
+  StreamSubscription<html.Event>?           _pasteSub;
+
   // Socket subscriptions
   StreamSubscription<Map<String, dynamic>>? _newMsgSub;
   StreamSubscription<Map<String, dynamic>>? _reviewUpdatedSub;
@@ -360,9 +385,11 @@ class _ChatScreenState extends State<ChatScreen> {
       _myUserId = authState.user.id;
     }
 
+    _scrollCtrl.addListener(_onScroll);
     _loadConversations();
     _subscribeSocket();
     _socket.clearUnreadCount();
+    _pasteSub = html.window.on['paste'].listen((e) => _onClipboardPaste(e as html.ClipboardEvent));
   }
 
   void _subscribeSocket() {
@@ -390,10 +417,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onMessagesRead(Map<String, dynamic> data) {
-    // This event is for showing read ticks on sent messages
-    // We'll implement this when we add read receipts UI
-    if (!mounted) return;
-    setState(() {});
+    final convId = data['conversation_id'] as String?;
+    if (!mounted || convId != _selectedId) return;
+    final readBy = data['read_by'] as String?;
+    final readAt = data['read_at'] as String?;
+    if (readBy == null || readAt == null) return;
+    final dt = DateTime.tryParse(readAt);
+    if (dt == null) return;
+    setState(() => _lastReadBy[readBy] = dt);
   }
 
   void _onSocketNewMessage(Map<String, dynamic> data) {
@@ -432,11 +463,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Parses a raw message map (same shape as getMessages API) into a _Message.
   _Message? _parseMessage(Map<String, dynamic> m) {
-    final type      = m['type'] as String? ?? 'text';
-    final senderId  = m['sender_id'] as String?;
-    final isSent    = senderId == _myUserId;
-    final time      = _formatTime(m['created_at'] as String? ?? '');
-    final senderName = m['sender_name'] as String?;
+    final type         = m['type'] as String? ?? 'text';
+    final msgId        = m['id'] as String?;
+    final createdAtIso = m['created_at'] as String?;
+    final senderId     = m['sender_id'] as String?;
+    final isSent       = senderId == _myUserId;
+    final time         = _formatTime(createdAtIso ?? '');
+    final senderName   = m['sender_name'] as String?;
 
     if (type == 'task_created' || type == 'task_review') {
       final isNotif = type == 'task_created';
@@ -470,9 +503,10 @@ class _ChatScreenState extends State<ChatScreen> {
         if (dt != null) dateStr = _fmtDate(dt);
       }
       return _Message(
+        id: msgId, createdAtIso: createdAtIso,
         sent: isSent, time: time, senderName: senderName,
         task: task != null ? _ChatTask(
-          messageId:           m['id'] as String? ?? '',
+          messageId:           msgId ?? '',
           taskId:              task['id'] as String? ?? '',
           title:               task['title'] as String? ?? '',
           description:         task['description'] as String? ?? '',
@@ -493,7 +527,15 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
-    return _Message(text: m['content'] as String?, sent: isSent, time: time, senderName: senderName);
+    return _Message(
+      id: msgId, createdAtIso: createdAtIso,
+      text:           m['content']         as String?,
+      sent: isSent, time: time, senderName: senderName,
+      attachmentUrl:  m['attachment_url']  as String?,
+      attachmentType: m['attachment_type'] as String?,
+      attachmentName: m['attachment_name'] as String?,
+      attachmentSize: m['attachment_size'] as int?,
+    );
   }
 
   void _selectConversation(String convId) {
@@ -518,8 +560,19 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _onScroll() {
+    if (!_scrollCtrl.hasClients) return;
+    final atBottom = _scrollCtrl.position.pixels >=
+        _scrollCtrl.position.maxScrollExtent - 80;
+    if (atBottom != !_showScrollDown) {
+      setState(() => _showScrollDown = !atBottom);
+    }
+  }
+
   @override
   void dispose() {
+    _scrollCtrl.removeListener(_onScroll);
+    _pasteSub?.cancel();
     _newMsgSub?.cancel();
     _reviewUpdatedSub?.cancel();
     _conversationReadSub?.cancel();
@@ -621,21 +674,32 @@ class _ChatScreenState extends State<ChatScreen> {
       final data = res.data as Map<String, dynamic>;
       final msgs = (data['messages'] as List).cast<Map<String, dynamic>>();
 
+      // Populate _lastReadBy from server snapshot so ticks are correct on load.
+      final rawLastRead = data['last_read_by'] as Map<String, dynamic>?;
+      _lastReadBy = {};
+      rawLastRead?.forEach((userId, ts) {
+        if (userId != _myUserId) {
+          final dt = DateTime.tryParse(ts as String? ?? '');
+          if (dt != null) _lastReadBy[userId] = dt;
+        }
+      });
+
       _messages = msgs.map((m) {
-        final type = m['type'] as String? ?? 'text';
-        final senderId = m['sender_id'] as String?;
-        final isSent = senderId == _myUserId;
-        final time = _formatTime(m['created_at'] as String? ?? '');
-        final senderName = m['sender_name'] as String?;
+        final type         = m['type'] as String? ?? 'text';
+        final msgId        = m['id'] as String?;
+        final createdAtIso = m['created_at'] as String?;
+        final senderId     = m['sender_id'] as String?;
+        final isSent       = senderId == _myUserId;
+        final time         = _formatTime(createdAtIso ?? '');
+        final senderName   = m['sender_name'] as String?;
 
         if (type == 'idea_request') {
           final ir = m['idea_request'] as Map<String, dynamic>?;
           if (ir != null) {
             return _Message(
-              sent:       isSent,
-              time:       time,
-              senderName: senderName,
-              ideaReq:    _IdeaRequest.fromJson(ir),
+              id: msgId, createdAtIso: createdAtIso,
+              sent: isSent, time: time, senderName: senderName,
+              ideaReq: _IdeaRequest.fromJson(ir),
             );
           }
         }
@@ -644,10 +708,9 @@ class _ChatScreenState extends State<ChatScreen> {
           final pr = m['pause_request'] as Map<String, dynamic>?;
           if (pr != null) {
             return _Message(
-              sent:       isSent,
-              time:       time,
-              senderName: senderName,
-              pauseReq:   _PauseRequest.fromJson(pr),
+              id: msgId, createdAtIso: createdAtIso,
+              sent: isSent, time: time, senderName: senderName,
+              pauseReq: _PauseRequest.fromJson(pr),
             );
           }
         }
@@ -655,13 +718,10 @@ class _ChatScreenState extends State<ChatScreen> {
         if (type == 'task_created' || type == 'task_review') {
           final isNotif = type == 'task_created';
           final task = m['task'] as Map<String, dynamic>?;
-          // Extract all assignee names
           String assigneeName = '';
           final assignees = task?['assignees'] as List?;
           if (assignees != null && assignees.isNotEmpty) {
-            assigneeName = assignees
-                .map((a) => (a as Map)['name']?.toString() ?? '')
-                .join(', ');
+            assigneeName = assignees.map((a) => (a as Map)['name']?.toString() ?? '').join(', ');
           } else {
             assigneeName = task?['person_name']?.toString() ?? '';
           }
@@ -669,24 +729,19 @@ class _ChatScreenState extends State<ChatScreen> {
           final priorityLabel = priorityRaw.isNotEmpty
               ? priorityRaw[0].toUpperCase() + priorityRaw.substring(1)
               : 'Medium';
-          // Extract all reviewer names
           String reviewerName = '';
           String reviewerId   = '';
           final reviewers = task?['reviewers'] as List?;
           if (reviewers != null && reviewers.isNotEmpty) {
-            reviewerName = reviewers
-                .map((r) => (r as Map)['name']?.toString() ?? '')
-                .join(', ');
-            reviewerId = (reviewers.first as Map)['id']?.toString() ?? '';
+            reviewerName = reviewers.map((r) => (r as Map)['name']?.toString() ?? '').join(', ');
+            reviewerId   = (reviewers.first as Map)['id']?.toString() ?? '';
           }
-          // Format end_date
           String? endDateStr;
           final rawEnd = task?['end_date'] as String?;
           if (rawEnd != null && rawEnd.isNotEmpty) {
             final dt = DateTime.tryParse(rawEnd);
             if (dt != null) endDateStr = _fmtDate(dt);
           }
-          // Format start date
           String dateStr = '';
           final rawDate = task?['date'] as String?;
           if (rawDate != null && rawDate.isNotEmpty) {
@@ -694,15 +749,14 @@ class _ChatScreenState extends State<ChatScreen> {
             if (dt != null) dateStr = _fmtDate(dt);
           }
           return _Message(
-            sent:       isSent,
-            time:       time,
-            senderName: senderName,
+            id: msgId, createdAtIso: createdAtIso,
+            sent: isSent, time: time, senderName: senderName,
             task: task != null ? _ChatTask(
-              messageId:    m['id'] as String? ?? '',
-              taskId:       task['id'] as String? ?? '',
-              title:        task['title'] as String? ?? '',
-              description:  task['description'] as String? ?? '',
-              assignee:     assigneeName,
+              messageId:           m['id'] as String? ?? '',
+              taskId:              task['id'] as String? ?? '',
+              title:               task['title'] as String? ?? '',
+              description:         task['description'] as String? ?? '',
+              assignee:            assigneeName,
               reviewerName:        reviewerName,
               reviewerId:          reviewerId,
               priority:            priorityLabel,
@@ -720,10 +774,13 @@ class _ChatScreenState extends State<ChatScreen> {
         }
 
         return _Message(
-          text:       m['content'] as String?,
-          sent:       isSent,
-          time:       time,
-          senderName: senderName,
+          id: msgId, createdAtIso: createdAtIso,
+          text:           m['content']         as String?,
+          sent: isSent, time: time, senderName: senderName,
+          attachmentUrl:  m['attachment_url']  as String?,
+          attachmentType: m['attachment_type'] as String?,
+          attachmentName: m['attachment_name'] as String?,
+          attachmentSize: _parseSize(m['attachment_size']),
         );
       }).toList().reversed.toList(); // API returns newest first, we want oldest first
     } catch (_) {
@@ -757,10 +814,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _scrollToBottom() {
+    // Two frames: first lets the ListView measure all items, second does the jump.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
-        _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
-      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollCtrl.hasClients) {
+          _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+        }
+      });
     });
   }
 
@@ -983,6 +1043,8 @@ class _ChatScreenState extends State<ChatScreen> {
                           color: _kPrimary)),
                   const SizedBox(height: 2),
                   Text(c.role,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 11, color: Colors.grey[500])),
                 ],
               ),
@@ -1025,7 +1087,44 @@ class _ChatScreenState extends State<ChatScreen> {
               ? const Center(child: CircularProgressIndicator())
               : _selectedId.isEmpty
                   ? const Center(child: Text('Select a conversation', style: TextStyle(color: Colors.grey)))
-                  : _buildMessages(contact),
+                  : Stack(
+                      children: [
+                        _buildMessages(contact),
+                        if (_showScrollDown)
+                          Positioned(
+                            bottom: 12,
+                            right: 16,
+                            child: AnimatedOpacity(
+                              opacity: _showScrollDown ? 1.0 : 0.0,
+                              duration: const Duration(milliseconds: 200),
+                              child: GestureDetector(
+                                onTap: () => _scrollCtrl.animateTo(
+                                  _scrollCtrl.position.maxScrollExtent,
+                                  duration: const Duration(milliseconds: 300),
+                                  curve: Curves.easeOut,
+                                ),
+                                child: Container(
+                                  width: 36,
+                                  height: 36,
+                                  decoration: BoxDecoration(
+                                    color: _kAccent,
+                                    shape: BoxShape.circle,
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withValues(alpha: 0.18),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ],
+                                  ),
+                                  child: const Icon(Icons.keyboard_arrow_down_rounded,
+                                      color: Colors.white, size: 22),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
         ),
         Container(height: 1, color: _kBorder),
         _buildInputBar(),
@@ -1102,6 +1201,7 @@ class _ChatScreenState extends State<ChatScreen> {
           const SizedBox(width: 10),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Text(c.name,
                   style: const TextStyle(
@@ -1231,6 +1331,9 @@ class _ChatScreenState extends State<ChatScreen> {
         if (msg.pauseReq != null)      return _buildPauseRequestCard(msg, contact);
         if (msg.ideaReq != null)       return _buildIdeaRequestCard(msg, contact);
         if (msg.imageCaption != null)  return _buildImageMessage(msg, contact);
+        if (msg.attachmentUrl != null || msg.attachmentName != null) {
+          return _buildAttachmentBubble(msg, contact);
+        }
         // Plain text — but skip rendering if there's nothing to show
         if (msg.text == null || msg.text!.isEmpty) return const SizedBox.shrink();
         return _buildTextBubble(msg, contact);
@@ -1257,7 +1360,9 @@ class _ChatScreenState extends State<ChatScreen> {
   // Plain text message bubble — left (received) or right (sent)
   Widget _buildTextBubble(_Message msg, _Contact contact) {
     final isSent = msg.sent;
-    return Padding(
+    return LayoutBuilder(builder: (context, constraints) {
+      final bubbleMaxWidth = constraints.maxWidth * 0.72;
+      return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Row(
         // Sent = end (right), received = start (left)
@@ -1279,65 +1384,96 @@ class _ChatScreenState extends State<ChatScreen> {
             const SizedBox(width: 8),
           ],
           Flexible(
-            child: Column(
-              crossAxisAlignment:
-                  isSent ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                // Sender name — shown in group chats for received messages
-                if (!isSent && _isGroupChat && msg.senderName != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 3),
-                    child: Text(msg.senderName!,
-                        style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: _avatarColor(msg.senderName!))),
-                  ),
-                // Bubble — accent bg for sent, light gray for received
-                GestureDetector(
-                  onDoubleTap: () {
-                    Clipboard.setData(ClipboardData(text: msg.text ?? ''));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Message copied to clipboard'),
-                        duration: Duration(milliseconds: 1500),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                  },
-                  child: Container(
-                    constraints: const BoxConstraints(maxWidth: 400),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: isSent ? _kAccent : _kBg,
-                      borderRadius: BorderRadius.only(
-                        topLeft:     const Radius.circular(12),
-                        topRight:    const Radius.circular(12),
-                        bottomLeft:  Radius.circular(isSent ? 12 : 2),
-                        bottomRight: Radius.circular(isSent ? 2  : 12),
-                      ),
-                      border: isSent ? null : Border.all(color: _kBorder),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: bubbleMaxWidth,
+              ),
+              child: Column(
+                crossAxisAlignment:
+                    isSent ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                children: [
+                  // Sender name — shown in group chats for received messages
+                  if (!isSent && _isGroupChat && msg.senderName != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 3),
+                      child: Text(msg.senderName!,
+                          style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: _avatarColor(msg.senderName!))),
                     ),
-                    child: _buildBubbleContent(msg.text ?? '', isSent),
+                  // Bubble — accent bg for sent, light gray for received
+                  GestureDetector(
+                    onDoubleTap: () {
+                      Clipboard.setData(ClipboardData(text: msg.text ?? ''));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Message copied to clipboard'),
+                          duration: Duration(milliseconds: 1500),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: isSent ? _kAccent : _kBg,
+                        borderRadius: BorderRadius.only(
+                          topLeft:     const Radius.circular(12),
+                          topRight:    const Radius.circular(12),
+                          bottomLeft:  Radius.circular(isSent ? 12 : 2),
+                          bottomRight: Radius.circular(isSent ? 2  : 12),
+                        ),
+                        border: isSent ? null : Border.all(color: _kBorder),
+                      ),
+                      child: _buildBubbleContent(msg.text ?? '', isSent),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 4),
-                // Timestamp
-                Text(
-                  isSent
-                      ? msg.time
-                      : _isGroupChat
-                          ? msg.time
-                        : '${contact.name}, ${msg.time}',
-                  style: TextStyle(fontSize: 10, color: Colors.grey[400]),
-                ),
-              ],
+                  const SizedBox(height: 4),
+                  // Timestamp + read ticks (sent messages only)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        isSent
+                            ? msg.time
+                            : _isGroupChat
+                                ? msg.time
+                                : '${contact.name}, ${msg.time}',
+                        style: TextStyle(fontSize: 10, color: Colors.grey[400]),
+                      ),
+                      if (isSent) ...[
+                        const SizedBox(width: 3),
+                        _buildReadTick(msg),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
           if (isSent) const SizedBox(width: 8),
         ],
       ),
+    );
+    }); // LayoutBuilder
+  }
+
+  bool _isMessageRead(_Message msg) {
+    final iso = msg.createdAtIso;
+    if (iso == null) return false;
+    final sentAt = DateTime.tryParse(iso);
+    if (sentAt == null) return false;
+    return _lastReadBy.values.any((readAt) => !readAt.isBefore(sentAt));
+  }
+
+  Widget _buildReadTick(_Message msg) {
+    final read = _isMessageRead(msg);
+    return Icon(
+      read ? Icons.done_all_rounded : Icons.done_rounded,
+      size: 13,
+      color: read ? const Color(0xFF34B7F1) : Colors.grey[400],
     );
   }
 
@@ -1978,7 +2114,7 @@ class _ChatScreenState extends State<ChatScreen> {
               child: TextField(
                 controller: _msgCtrl,
                 focusNode:  _msgFocus,
-                maxLines: null,   // grows vertically with content
+                maxLines: 6,
                 style: const TextStyle(fontSize: 13),
                 decoration: InputDecoration(
                   hintText: 'Type a message...',
@@ -1996,7 +2132,7 @@ class _ChatScreenState extends State<ChatScreen> {
           IconButton(
             icon: Icon(Icons.attach_file_outlined,
                 size: 20, color: Colors.grey[500]),
-            onPressed: () {},
+            onPressed: _selectedId.isEmpty ? null : _pickAndUploadFile,
             tooltip: 'Attach file',
           ),
           // Voice memo
@@ -2033,8 +2169,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _msgCtrl.clear();
 
     // Optimistically add the message locally
+    final nowIso = DateTime.now().toUtc().toIso8601String();
     setState(() {
-      _messages.add(_Message(text: text, sent: true, time: _formatTime(DateTime.now().toIso8601String())));
+      _messages.add(_Message(
+        createdAtIso: nowIso,
+        text: text, sent: true,
+        time: _formatTime(nowIso),
+      ));
     });
     _scrollToBottom();
 
@@ -2043,6 +2184,273 @@ class _ChatScreenState extends State<ChatScreen> {
       // Reload conversations to update last_message preview
       _loadConversations();
     } catch (_) {}
+  }
+
+  Future<void> _pickAndUploadFile() async {
+    final result = await FilePicker.platform.pickFiles(withData: true);
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    final bytes = file.bytes;
+    if (bytes == null) return;
+    await _uploadBytes(bytes, file.name, _mimeFromExtension(file.extension ?? ''),
+        knownSize: file.size);
+  }
+
+  void _onClipboardPaste(html.ClipboardEvent event) {
+    debugPrint('[Paste] fired, selectedId=$_selectedId, items=${event.clipboardData?.items?.length}');
+    if (!mounted || _selectedId.isEmpty) return;
+    final items = event.clipboardData?.items;
+    if (items == null) return;
+    for (int i = 0; i < (items.length ?? 0); i++) {
+      final item = items[i];
+      final mime = item.type ?? '';
+      if (mime.startsWith('image/')) {
+        final blob = item.getAsFile();
+        if (blob == null) continue;
+        event.preventDefault();
+        final reader = html.FileReader();
+        reader.readAsArrayBuffer(blob);
+        reader.onLoad.first.then((_) {
+          final bytes = (reader.result as ByteBuffer).asUint8List();
+          final ext   = mime.split('/').last;
+          final name  = 'screenshot.${ext == 'jpeg' ? 'jpg' : ext}';
+          _uploadBytes(bytes, name, mime);
+        });
+        return;
+      }
+    }
+  }
+
+  Future<void> _uploadBytes(
+    List<int> bytes,
+    String fileName,
+    String mimeType, {
+    int? knownSize,
+  }) async {
+    if (_selectedId.isEmpty) return;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    setState(() {
+      _messages.add(_Message(
+        createdAtIso:   nowIso,
+        sent:           true,
+        time:           _formatTime(nowIso),
+        attachmentName: fileName,
+        attachmentSize: knownSize ?? bytes.length,
+        attachmentType: mimeType,
+      ));
+    });
+    _scrollToBottom();
+
+    try {
+      final caption = _msgCtrl.text.trim().isEmpty ? null : _msgCtrl.text.trim();
+      final res = await _api.uploadMessageFile(
+        _selectedId, bytes, fileName,
+        content:  caption,
+        mimeType: mimeType,
+      );
+      _msgCtrl.clear();
+      if (!mounted) return;
+      final m = res.data as Map<String, dynamic>;
+      setState(() {
+        _messages.removeLast();
+        _messages.add(_Message(
+          id:             m['id']              as String?,
+          createdAtIso:   m['created_at']      as String?,
+          sent:           true,
+          time:           _formatTime(m['created_at'] as String? ?? ''),
+          text:           m['content']         as String?,
+          attachmentUrl:  m['attachment_url']  as String?,
+          attachmentType: m['attachment_type'] as String?,
+          attachmentName: m['attachment_name'] as String?,
+          attachmentSize: _parseSize(m['attachment_size']),
+        ));
+      });
+      _scrollToBottom();
+      _loadConversations();
+    } catch (e) {
+      debugPrint('[Upload] error: $e');
+      if (!mounted) return;
+      setState(() => _messages.removeLast());
+      String msg = 'Failed to upload file';
+      if (e is DioException) {
+        final data = e.response?.data;
+        if (data is Map && data['error'] is String) msg = data['error'] as String;
+        debugPrint('[Upload] status: ${e.response?.statusCode}, body: $data');
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  static int? _parseSize(dynamic v) {
+    if (v == null) return null;
+    if (v is int) return v;
+    return int.tryParse(v.toString());
+  }
+
+  static String _mimeFromExtension(String ext) {
+    return switch (ext.toLowerCase()) {
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'png'           => 'image/png',
+      'gif'           => 'image/gif',
+      'webp'          => 'image/webp',
+      'pdf'           => 'application/pdf',
+      _               => 'application/octet-stream',
+    };
+  }
+
+  static String _formatFileSize(int bytes) {
+    if (bytes < 1024) return '${bytes}B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)}KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)}MB';
+  }
+
+  Widget _buildAttachmentBubble(_Message msg, _Contact contact) {
+    final isSent       = msg.sent;
+    final isImage      = msg.attachmentType?.startsWith('image/') == true;
+    final isPdf        = msg.attachmentType == 'application/pdf';
+    final name         = msg.attachmentName ?? 'file';
+    final sizeLabel    = msg.attachmentSize != null ? _formatFileSize(msg.attachmentSize!) : '';
+
+    return LayoutBuilder(builder: (context, constraints) {
+    final bubbleMaxWidth = constraints.maxWidth * 0.72;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Row(
+        mainAxisAlignment: isSent ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (!isSent) ...[
+            CircleAvatar(
+              radius: 14,
+              backgroundColor: contact.avatarColor,
+              child: Text(contact.initials,
+                  style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(width: 8),
+          ],
+          Flexible(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: bubbleMaxWidth,
+              ),
+              child: Column(
+                crossAxisAlignment: isSent ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                children: [
+                  if (!isSent && _isGroupChat && msg.senderName != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 3),
+                      child: Text(msg.senderName!,
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                              color: _avatarColor(msg.senderName!))),
+                    ),
+                  GestureDetector(
+                    onTap: msg.attachmentUrl != null ? () => _launchURL(msg.attachmentUrl!) : null,
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 300),
+                    decoration: BoxDecoration(
+                      color: isSent ? _kAccent : _kBg,
+                      borderRadius: BorderRadius.only(
+                        topLeft:     const Radius.circular(12),
+                        topRight:    const Radius.circular(12),
+                        bottomLeft:  Radius.circular(isSent ? 12 : 2),
+                        bottomRight: Radius.circular(isSent ? 2  : 12),
+                      ),
+                      border: isSent ? null : Border.all(color: _kBorder),
+                    ),
+                    child: isImage && msg.attachmentUrl != null
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.only(
+                              topLeft:     const Radius.circular(12),
+                              topRight:    const Radius.circular(12),
+                              bottomLeft:  Radius.circular(isSent ? 12 : 2),
+                              bottomRight: Radius.circular(isSent ? 2  : 12),
+                            ),
+                            child: Image.network(
+                              msg.attachmentUrl!,
+                              width: 260,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => _buildFileRow(
+                                  name, sizeLabel, isPdf, isSent, uploading: false),
+                            ),
+                          )
+                        : _buildFileRow(name, sizeLabel, isPdf, isSent,
+                            uploading: msg.attachmentUrl == null),
+                  ),
+                ),
+                if (msg.text != null && msg.text!.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Container(
+                    constraints: const BoxConstraints(maxWidth: 300),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isSent ? _kAccent : _kBg,
+                      borderRadius: BorderRadius.circular(10),
+                      border: isSent ? null : Border.all(color: _kBorder),
+                    ),
+                    child: Text(msg.text!,
+                        style: TextStyle(fontSize: 13, color: isSent ? Colors.white : _kPrimary)),
+                  ),
+                ],
+                const SizedBox(height: 4),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      isSent ? msg.time : _isGroupChat ? msg.time : '${contact.name}, ${msg.time}',
+                      style: TextStyle(fontSize: 10, color: Colors.grey[400]),
+                    ),
+                    if (isSent) ...[
+                      const SizedBox(width: 3),
+                      _buildReadTick(msg),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+          if (isSent) const SizedBox(width: 8),
+        ],
+      ),
+    );
+    }); // LayoutBuilder
+  }
+
+  Widget _buildFileRow(String name, String size, bool isPdf, bool isSent, {bool uploading = false}) {
+    final iconColor = isSent ? Colors.white70 : Colors.grey[600]!;
+    final textColor = isSent ? Colors.white : _kPrimary;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          uploading
+              ? SizedBox(width: 20, height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2,
+                      color: isSent ? Colors.white70 : _kAccent))
+              : Icon(isPdf ? Icons.picture_as_pdf_outlined : Icons.insert_drive_file_outlined,
+                  size: 22, color: iconColor),
+          const SizedBox(width: 10),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(name,
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: textColor),
+                    maxLines: 2, overflow: TextOverflow.ellipsis),
+                if (size.isNotEmpty)
+                  Text(size, style: TextStyle(fontSize: 10, color: isSent ? Colors.white60 : Colors.grey[500])),
+              ],
+            ),
+          ),
+          if (!uploading) ...[
+            const SizedBox(width: 8),
+            Icon(Icons.open_in_new_rounded, size: 14, color: iconColor),
+          ],
+        ],
+      ),
+    );
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
