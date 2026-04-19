@@ -158,6 +158,7 @@ class _ChatTask {
   final String  reviewerId;
   final String  priority;   // Urgent / High / Medium / Low
   final String  type;
+  final String  status;     // todo / in_progress / completed / etc.
   final String  date;       // display string
   final String? endDate;    // display string, nullable
   bool          isPaused;
@@ -176,6 +177,7 @@ class _ChatTask {
     this.reviewerId           = '',
     required this.priority,
     required this.type,
+    this.status               = '',
     required this.date,
     this.endDate              = null,
     this.isPaused             = false,
@@ -514,7 +516,8 @@ class _ChatScreenState extends State<ChatScreen> {
           reviewerName:        reviewerName,
           reviewerId:          reviewerId,
           priority:            priorityLabel,
-          type:                '',
+          type:                task['type_name'] as String? ?? task['type'] as String? ?? '',
+          status:              task['status'] as String? ?? '',
           date:                dateStr,
           endDate:             endDateStr,
           isPaused:            task['is_paused'] as bool? ?? false,
@@ -760,7 +763,8 @@ class _ChatScreenState extends State<ChatScreen> {
               reviewerName:        reviewerName,
               reviewerId:          reviewerId,
               priority:            priorityLabel,
-              type:                '',
+              type:                task['type_name'] as String? ?? task['type'] as String? ?? '',
+              status:              task['status'] as String? ?? '',
               date:                dateStr,
               endDate:             endDateStr,
               isPaused:            task['is_paused'] as bool? ?? false,
@@ -1918,12 +1922,16 @@ class _ChatScreenState extends State<ChatScreen> {
       _        => const Color(0xFF9CA3AF),
     };
 
-    final statusColor = isCompleted
-        ? const Color(0xFF10B981)
-        : isRejected
-            ? const Color(0xFFEF4444)
-            : const Color(0xFFF59E0B);
-    final statusLabel = isCompleted ? 'Completed' : isRejected ? 'Rejected' : 'In Review';
+    final rawStatus = task.status.isNotEmpty ? task.status : (isCompleted ? 'completed' : isRejected ? 'rejected' : 'in_review');
+    final statusLabel = rawStatus.replaceAll('_', ' ').split(' ').map((w) => w.isNotEmpty ? w[0].toUpperCase() + w.substring(1) : '').join(' ');
+    final statusColor = switch (rawStatus) {
+      'completed'   => const Color(0xFF10B981),
+      'rejected'    => const Color(0xFFEF4444),
+      'in_progress' => const Color(0xFF6366F1),
+      'todo'        => const Color(0xFF9CA3AF),
+      'paused'      => const Color(0xFFF59E0B),
+      _             => const Color(0xFFF59E0B),
+    };
 
     showGeneralDialog(
       context: context,
