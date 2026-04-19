@@ -357,12 +357,12 @@ class ApiClient {
 
   Future<Response> uploadMessageFile(
     String conversationId,
-    String filePath,
+    List<int> bytes,
     String fileName, {
     String? content,
   }) {
     final formData = FormData.fromMap({
-      'file': MultipartFile.fromFileSync(filePath, filename: fileName),
+      'file': MultipartFile.fromBytes(bytes, filename: fileName),
       if (content != null && content.isNotEmpty) 'content': content,
     });
     return dio.post(

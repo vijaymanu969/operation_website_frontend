@@ -862,12 +862,29 @@ class _ChatScreenState extends State<ChatScreen> {
         : _Status.offline;
 
     final convId = conv['id'] as String;
-    
-    // Use backend's unread_count if available, otherwise use session-based tracking
-    final backendUnread = conv['unread_count'] as int?;
+
+    final backendUnread = conv['unread_count'] as int? ?? 0;
     final sessionUnread = _unreadByConv[convId] ?? 0;
-    final unreadCount = backendUnread ?? sessionUnread;
-    
+    // Take whichever is higher — session tracks new socket messages after page load
+    final unreadCount = sessionUnread > backendUnread ? sessionUnread : backendUnread;
+
+    // Format last message timestamp for display
+    final lastMsgTime = lastMsg?['created_at'] as String?;
+    String lastSeen = '';
+    if (lastMsgTime != null) {
+      try {
+        final dt = DateTime.parse(lastMsgTime).toLocal();
+        final now = DateTime.now();
+        if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
+          final h = dt.hour.toString().padLeft(2, '0');
+          final m = dt.minute.toString().padLeft(2, '0');
+          lastSeen = '$h:$m';
+        } else {
+          lastSeen = '${dt.day}/${dt.month}';
+        }
+      } catch (_) {}
+    }
+
     return _Contact(
       id:          convId,
       name:        name,
@@ -875,7 +892,7 @@ class _ChatScreenState extends State<ChatScreen> {
       initials:    initials,
       avatarColor: _avatarColor(name),
       status:      status,
-      lastSeen:    '',
+      lastSeen:    lastSeen,
       preview:     preview,
       unreadCount: unreadCount,
     );
@@ -2245,8 +2262,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final caption = _msgCtrl.text.trim().isEmpty ? null : _msgCtrl.text.trim();
       final res = await _api.uploadMessageFile(
         _selectedId, bytes, fileName,
-        content:  caption,
-        mimeType: mimeType,
+        content: caption,
       );
       _msgCtrl.clear();
       if (!mounted) return;
