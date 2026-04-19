@@ -323,7 +323,8 @@ final _kMessagesByContact = <String, List<_Message>>{
 // ── Screen ─────────────────────────────────────────────────────────────────────
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key});
+  final String? initialConvId;
+  const ChatScreen({super.key, this.initialConvId});
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
@@ -661,8 +662,12 @@ class _ChatScreenState extends State<ChatScreen> {
       // Auto-select first conversation on desktop only.
       // On mobile we show the contacts list first (WhatsApp-style).
       // _isMobile is set each build — no BuildContext needed across the async gap.
-      if (!_isMobile && _conversations.isNotEmpty && _selectedId.isEmpty) {
-        _selectConversation(_conversations.first['id'] as String);
+      if (_selectedId.isEmpty && _conversations.isNotEmpty) {
+        final deepLink = widget.initialConvId;
+        final target = deepLink != null && _conversations.any((c) => c['id'] == deepLink)
+            ? deepLink
+            : (!_isMobile ? _conversations.first['id'] as String : null);
+        if (target != null) _selectConversation(target);
       }
     } catch (_) {
       _conversations = [];
@@ -2553,7 +2558,7 @@ class _ChatTaskCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isNotif     = task.isNotification;
-    final isPending   = !isNotif && task.reviewStatus == _TaskReviewStatus.pending;
+    final isPending   = !isNotif && task.reviewStatus == _TaskReviewStatus.pending && task.status != 'completed';
     final isCompleted = !isNotif && task.reviewStatus == _TaskReviewStatus.completed;
     final isRejected  = !isNotif && task.reviewStatus == _TaskReviewStatus.rejected;
 

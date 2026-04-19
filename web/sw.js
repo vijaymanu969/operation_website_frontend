@@ -15,15 +15,27 @@ self.addEventListener('push', (e) => {
 
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
+
+  const data = e.notification.data || {};
+  let path = '/';
+
+  if (data.type === 'new_message' && data.conversation_id) {
+    path = '/chat?conv=' + data.conversation_id;
+  } else if (data.task_id) {
+    path = '/tasks?task=' + data.task_id;
+  }
+
+  const targetUrl = self.location.origin + path;
+
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
-      // Focus existing tab if open, otherwise open a new one.
       for (const c of list) {
         if (c.url.startsWith(self.location.origin) && 'focus' in c) {
-          return c.focus();
+          c.focus();
+          return c.navigate(targetUrl);
         }
       }
-      return clients.openWindow('/');
+      return clients.openWindow(targetUrl);
     })
   );
 });

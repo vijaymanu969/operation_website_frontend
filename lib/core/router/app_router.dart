@@ -67,7 +67,10 @@ class AppRouter {
           ),
           GoRoute(
             path: '/tasks',
-            builder: (context, state) => const TasksScreen(),
+            builder: (context, state) {
+              final taskId = state.uri.queryParameters['task'];
+              return taskId != null ? TasksScreen(initialTaskId: taskId) : const TasksScreen();
+            },
           ),
           GoRoute(
             path: '/attendance',
@@ -75,7 +78,10 @@ class AppRouter {
           ),
           GoRoute(
             path: '/chat',
-            builder: (context, state) => const ChatScreen(),
+            builder: (context, state) {
+              final convId = state.uri.queryParameters['conv'];
+              return convId != null ? ChatScreen(initialConvId: convId) : const ChatScreen();
+            },
           ),
           GoRoute(
             path: '/analytics',

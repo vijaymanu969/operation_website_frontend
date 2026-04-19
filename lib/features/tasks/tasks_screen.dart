@@ -238,7 +238,8 @@ class TaskItem extends AppFlowyGroupItem {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 class TasksScreen extends StatefulWidget {
-  const TasksScreen({super.key});
+  final String? initialTaskId;
+  const TasksScreen({super.key, this.initialTaskId});
   @override
   State<TasksScreen> createState() => _TasksScreenState();
 }
@@ -492,6 +493,15 @@ class _TasksScreenState extends State<TasksScreen> {
 
       _loadedTasks = tasks;
       _rebuildBoard(tasks);
+      final deepLink = widget.initialTaskId;
+      if (deepLink != null && mounted) {
+        final match = tasks.firstWhere((t) => t.id == deepLink, orElse: () => tasks.first);
+        if (match.id == deepLink) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _showTaskDetailModal(match);
+          });
+        }
+      }
     } catch (_) {
       // If API fails, show empty board
       for (final g in _boardCtrl.groupDatas.toList()) {
