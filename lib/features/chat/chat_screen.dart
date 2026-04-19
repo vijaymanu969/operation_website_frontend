@@ -2558,9 +2558,10 @@ class _ChatTaskCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isNotif     = task.isNotification;
-    final isPending   = !isNotif && task.reviewStatus == _TaskReviewStatus.pending && task.status != 'completed';
-    final isCompleted = !isNotif && task.reviewStatus == _TaskReviewStatus.completed;
-    final isRejected  = !isNotif && task.reviewStatus == _TaskReviewStatus.rejected;
+    final taskDone    = task.status == 'completed';
+    final isPending   = !isNotif && task.reviewStatus == _TaskReviewStatus.pending && !taskDone;
+    final isCompleted = !isNotif && (task.reviewStatus == _TaskReviewStatus.completed || taskDone);
+    final isRejected  = !isNotif && task.reviewStatus == _TaskReviewStatus.rejected && !taskDone;
 
     final borderColor = isNotif
         ? const Color(0xFF6366F1)
