@@ -392,6 +392,116 @@ class ApiClient {
     return dio.put('/chat/messages/$messageId/review', data: {'status': status});
   }
 
+  // ── Clients ────────────────────────────────────────────────────────────────
+
+  Future<Response> getClients({
+    int?    page,
+    int?    limit,
+    String? stage,
+    String? product,
+    String? vertical,
+    String? onboardingSubstage,
+    String? search,
+    String? sortBy,
+    String? sortOrder,
+  }) {
+    final params = <String, dynamic>{};
+    if (page != null)               params['page']                = page;
+    if (limit != null)              params['limit']               = limit;
+    if (stage != null)              params['stage']               = stage;
+    if (product != null)            params['product']             = product;
+    if (vertical != null)           params['vertical']            = vertical;
+    if (onboardingSubstage != null) params['onboarding_substage'] = onboardingSubstage;
+    if (search != null && search.isNotEmpty) params['search']     = search;
+    if (sortBy != null)             params['sort_by']             = sortBy;
+    if (sortOrder != null)          params['sort_order']          = sortOrder;
+    return dio.get('/clients', queryParameters: params);
+  }
+
+  Future<Response> getClient(String id) {
+    return dio.get('/clients/$id');
+  }
+
+  Future<Response> createClient(Map<String, dynamic> data) {
+    return dio.post('/clients', data: data);
+  }
+
+  Future<Response> updateClient(String id, Map<String, dynamic> data) {
+    return dio.put('/clients/$id', data: data);
+  }
+
+  Future<Response> deleteClient(String id) {
+    return dio.delete('/clients/$id');
+  }
+
+  Future<Response> changeClientStage(String id, Map<String, dynamic> data) {
+    return dio.patch('/clients/$id/stage', data: data);
+  }
+
+  Future<Response> changeOnboardingSubstage(String id, Map<String, dynamic> data) {
+    return dio.patch('/clients/$id/onboarding-substage', data: data);
+  }
+
+  Future<Response> getClientHistory(String id) {
+    return dio.get('/clients/$id/history');
+  }
+
+  Future<Response> getClientTimeline(String id) {
+    return dio.get('/clients/$id/timeline');
+  }
+
+  Future<Response> getDashboardStats() {
+    return dio.get('/dashboard/stats');
+  }
+
+  Future<Response> getClientDocuments(String clientId, {String? documentType}) {
+    final params = <String, dynamic>{};
+    if (documentType != null) params['document_type'] = documentType;
+    return dio.get('/clients/$clientId/documents', queryParameters: params);
+  }
+
+  Future<Response> uploadClientDocument({
+    required String       clientId,
+    required String       documentType,
+    required List<int>    bytes,
+    required String       filename,
+    String?               documentName,
+    String?               notes,
+  }) {
+    final form = FormData.fromMap({
+      'document_type': documentType,
+      'file':          MultipartFile.fromBytes(bytes, filename: filename),
+      if (documentName != null && documentName.isNotEmpty) 'document_name': documentName,
+      if (notes        != null && notes.isNotEmpty)        'notes':         notes,
+    });
+    return dio.post('/clients/$clientId/documents', data: form);
+  }
+
+  Future<Response> deleteClientDocument(String docId) {
+    return dio.delete('/client-documents/$docId');
+  }
+
+  Future<Response> getClientOnboardingTasks(String clientId, {String? substage, String? status}) {
+    final params = <String, dynamic>{};
+    if (substage != null) params['substage'] = substage;
+    if (status   != null) params['status']   = status;
+    return dio.get('/clients/$clientId/tasks', queryParameters: params);
+  }
+
+  Future<Response> updateOnboardingTaskStatus(String taskId, String status, {String? notes}) {
+    return dio.patch('/onboarding-tasks/$taskId/status', data: {
+      'status': status,
+      if (notes != null && notes.isNotEmpty) 'notes': notes,
+    });
+  }
+
+  Future<Response> getUpcomingMeetings({int daysAhead = 7, int limit = 10}) {
+    return dio.get('/meetings/upcoming', queryParameters: {
+      'days_ahead': daysAhead,
+      'limit':      limit,
+    });
+  }
+
   // ── Analytics ──────────────────────────────────────────────────────────────
 
   Future<Response> getAnalyticsDashboard({String? startDate, String? endDate}) {
