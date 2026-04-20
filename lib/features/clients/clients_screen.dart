@@ -1020,6 +1020,10 @@ class _ClientDetailPanelState extends State<_ClientDetailPanel> {
   bool _loadingTasks = false;
   final Set<String> _togglingTaskIds = {};
 
+  // Upcoming events (any stage)
+  List<Map<String, dynamic>> _upcoming = [];
+  bool _loadingUpcoming = false;
+
   @override
   void initState() {
     super.initState();
@@ -1028,6 +1032,22 @@ class _ClientDetailPanelState extends State<_ClientDetailPanel> {
     _fetchFreshClient();
     if (widget.client.stage == ClientStage.nod)         _loadRoadmaps();
     if (widget.client.stage == ClientStage.onboarding)  _loadTasks();
+    _loadUpcoming();
+  }
+
+  Future<void> _loadUpcoming() async {
+    setState(() => _loadingUpcoming = true);
+    try {
+      final now = DateTime.now();
+      final end = now.add(const Duration(days: 30));
+      String fmt(DateTime d) => '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+      final res = await widget.api.getClientCalendar(widget.client.id, start: fmt(now), end: fmt(end));
+      final list = ((res.data['data']?['events'] as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      if (!mounted) return;
+      setState(() { _upcoming = list.take(10).toList(); _loadingUpcoming = false; });
+    } catch (_) {
+      if (mounted) setState(() => _loadingUpcoming = false);
+    }
   }
 
   Future<void> _loadTasks() async {
@@ -1459,6 +1479,23 @@ class _ClientDetailPanelState extends State<_ClientDetailPanel> {
                   const SizedBox(height: 16),
                 ],
 
+                // Upcoming events (next 30 days)
+                _PanelSection(label: 'Upcoming', children: [
+                  if (_loadingUpcoming)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: _kPrimary))),
+                    )
+                  else if (_upcoming.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 4),
+                      child: Text('No events in the next 30 days.', style: TextStyle(fontSize: 12, color: _kMuted)),
+                    )
+                  else
+                    ..._upcoming.map((e) => _UpcomingRow(event: e)),
+                ]),
+                const SizedBox(height: 16),
+
                 // Timeline
                 _PanelSection(label: 'Timeline', children: [
                   if (c.leadDate != null)
@@ -1723,6 +1760,57 @@ class _RoadmapRow extends StatelessWidget {
     if (diff == 1) return '1 day ago';
     if (diff < 7)  return '$diff days ago';
     return _fmtDate(dt.toLocal());
+  }
+}
+
+// ─── Upcoming event row (per-client panel) ───────────────────────────────────
+class _UpcomingRow extends StatelessWidget {
+  final Map<String, dynamic> event;
+  const _UpcomingRow({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    final type   = event['type'] as String? ?? '';
+    final title  = event['title'] as String? ?? '';
+    final date   = event['date']  as String? ?? '';
+    final time   = event['time']  as String?;
+    final color  = type == 'meeting' ? const Color(0xFF3B82F6) : const Color(0xFFF59E0B);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: _kBg,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: _kBorder),
+        ),
+        child: Row(children: [
+          Container(width: 4, height: 28, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(2))),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize:       MainAxisSize.min,
+              children: [
+                Text(title,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF374151)),
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                const SizedBox(height: 2),
+                Text(time != null ? '$date · $time' : date,
+                    style: const TextStyle(fontSize: 10, color: _kMuted)),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(3)),
+            child: Text(type.toUpperCase(),
+                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: color, letterSpacing: 0.4)),
+          ),
+        ]),
+      ),
+    );
   }
 }
 

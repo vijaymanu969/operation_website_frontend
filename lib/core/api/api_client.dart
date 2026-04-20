@@ -495,6 +495,34 @@ class ApiClient {
     });
   }
 
+  // ── Calendar ───────────────────────────────────────────────────────────────
+
+  /// Cross-client calendar. Dates are YYYY-MM-DD.
+  Future<Response> getClientsCalendar({
+    String? start,
+    String? end,
+    List<String>? types,
+  }) {
+    final params = <String, dynamic>{};
+    if (start != null) params['start'] = start;
+    if (end   != null) params['end']   = end;
+    if (types != null && types.isNotEmpty) params['types'] = types.join(',');
+    return dio.get('/clients/calendar', queryParameters: params);
+  }
+
+  /// Per-client calendar.
+  Future<Response> getClientCalendar(String clientId, {
+    String? start,
+    String? end,
+    List<String>? types,
+  }) {
+    final params = <String, dynamic>{};
+    if (start != null) params['start'] = start;
+    if (end   != null) params['end']   = end;
+    if (types != null && types.isNotEmpty) params['types'] = types.join(',');
+    return dio.get('/clients/$clientId/calendar', queryParameters: params);
+  }
+
   Future<Response> getUpcomingMeetings({int daysAhead = 7, int limit = 10}) {
     return dio.get('/meetings/upcoming', queryParameters: {
       'days_ahead': daysAhead,
