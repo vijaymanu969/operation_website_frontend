@@ -83,6 +83,7 @@ class TaskItem extends AppFlowyGroupItem {
   // Pause/drift fields
   bool     isPaused;
   Map<String, dynamic>? pendingPauseRequest; // non-null = pending approval
+  Map<String, dynamic>? pendingIdeaRequest;  // non-null = pending idea-move approval
   int?     plannedDays;
   int?     pausedDays;
   int?     actualDays;
@@ -116,6 +117,7 @@ class TaskItem extends AppFlowyGroupItem {
     this.sortOrder   = 0,
     this.isPaused            = false,
     this.pendingPauseRequest,
+    this.pendingIdeaRequest,
     this.plannedDays,
     this.pausedDays,
     this.actualDays,
@@ -191,6 +193,7 @@ class TaskItem extends AppFlowyGroupItem {
       sortOrder:    json['sort_order'] as int? ?? 0,
       isPaused:            json['is_paused'] as bool? ?? false,
       pendingPauseRequest: json['pending_pause_request'] as Map<String, dynamic>?,
+      pendingIdeaRequest:  json['pending_idea_request']  as Map<String, dynamic>?,
       plannedDays:  json['planned_days'] as int?,
       pausedDays:   json['paused_days'] as int?,
       actualDays:   json['actual_days'] as int?,
@@ -508,6 +511,7 @@ class _TasksScreenState extends State<TasksScreen> {
         _boardCtrl.removeGroup(g.id);
       }
       _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo',        name: 'To Do',       items: []));
+      _boardCtrl.addGroup(AppFlowyGroupData(id: 'paused',      name: 'Paused',      items: []));
       _boardCtrl.addGroup(AppFlowyGroupData(id: 'in_progress', name: 'In Progress', items: []));
       _boardCtrl.addGroup(AppFlowyGroupData(id: 'done',        name: 'Done',        items: []));
       _boardCtrl.addGroup(AppFlowyGroupData(id: 'idea',        name: 'Ideas',       items: []));
@@ -517,6 +521,7 @@ class _TasksScreenState extends State<TasksScreen> {
 
   void _rebuildBoard(List<TaskItem> tasks) {
     final todoItems       = <AppFlowyGroupItem>[];
+    final pausedItems     = <AppFlowyGroupItem>[];
     final inProgressItems = <AppFlowyGroupItem>[];
     final doneItems       = <AppFlowyGroupItem>[];
     final ideaItems       = <AppFlowyGroupItem>[];
@@ -527,6 +532,8 @@ class _TasksScreenState extends State<TasksScreen> {
         ideaItems.add(task);
       } else if (task.status == 'completed') {
         doneItems.add(task);
+      } else if (task.isPaused) {
+        pausedItems.add(task);
       } else if (task.date != null &&
           !task.date!.isAfter(DateTime(today.year, today.month, today.day))) {
         inProgressItems.add(task);
@@ -550,6 +557,7 @@ class _TasksScreenState extends State<TasksScreen> {
     }
 
     todoItems.sort(pinSort);
+    pausedItems.sort(pinSort);
     inProgressItems.sort(pinSort);
     doneItems.sort(pinSort);
     ideaItems.sort(pinSort);
@@ -558,6 +566,7 @@ class _TasksScreenState extends State<TasksScreen> {
       _boardCtrl.removeGroup(g.id);
     }
     _boardCtrl.addGroup(AppFlowyGroupData(id: 'todo',        name: 'To Do',       items: todoItems));
+    _boardCtrl.addGroup(AppFlowyGroupData(id: 'paused',      name: 'Paused',      items: pausedItems));
     _boardCtrl.addGroup(AppFlowyGroupData(id: 'in_progress', name: 'In Progress', items: inProgressItems));
     _boardCtrl.addGroup(AppFlowyGroupData(id: 'done',        name: 'Done',        items: doneItems));
     _boardCtrl.addGroup(AppFlowyGroupData(id: 'idea',        name: 'Ideas',       items: ideaItems));
@@ -2749,6 +2758,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       item.columnGroup    = fresh.columnGroup;
       item.isPaused       = fresh.isPaused;
       item.pendingPauseRequest = fresh.pendingPauseRequest;
+      item.pendingIdeaRequest  = fresh.pendingIdeaRequest;
     });
     widget.onChanged();
   }
@@ -3025,6 +3035,22 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     }
   }
 
+  Future<void> _reviewIdeaRequest(TaskItem item, String requestId, String status) async {
+    try {
+      await _panelApi.reviewIdeaRequest(requestId, status);
+      setState(() {
+        item.pendingIdeaRequest = null;
+        if (status == 'approved') item.status = 'idea';
+      });
+      widget.onChanged();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to $status idea request')),
+      );
+    }
+  }
+
   Future<void> _showPauseDialog() async {
     String selectedReason = 'blocked';
     final noteCtrl = TextEditingController();
@@ -3119,6 +3145,58 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   }
 
   Widget _buildMoveToIdeaButton(TaskItem item) {
+    final req           = item.pendingIdeaRequest;
+    final currentUserId = widget.currentUserId;
+    final isReviewer    = item.reviewerId != null && item.reviewerId == currentUserId;
+
+    if (req != null) {
+      if (isReviewer) {
+        final reqId = req['id'] as String;
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          OutlinedButton(
+            onPressed: () => _reviewIdeaRequest(item, reqId, 'rejected'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _kAccent,
+              side: const BorderSide(color: _kAccent),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+            ),
+            child: const Text('Deny Idea', style: TextStyle(fontSize: 11)),
+          ),
+          const SizedBox(width: 6),
+          FilledButton(
+            onPressed: () => _reviewIdeaRequest(item, reqId, 'approved'),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF8B5CF6),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+            ),
+            child: const Text('Approve Idea', style: TextStyle(fontSize: 11)),
+          ),
+        ]);
+      }
+      // Requester/assignee — locked pill
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color:        const Color(0xFFF5F3FF),
+          borderRadius: BorderRadius.circular(6),
+          border:       Border.all(color: const Color(0xFF8B5CF6)),
+        ),
+        child: const Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.hourglass_top_rounded, size: 12, color: Color(0xFF8B5CF6)),
+          SizedBox(width: 6),
+          Text('Idea Requested',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF8B5CF6))),
+        ]),
+      );
+    }
+
+    // No request — show Move to Idea trigger
     return Material(
       color:        const Color(0xFFF5F3FF),
       borderRadius: BorderRadius.circular(6),
@@ -3416,8 +3494,9 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                            item.reviewerId == widget.currentUserId))
                         _buildPauseResumeButton(item),
                       if (item.status == 'not_completed' &&
-                          item.createdBy != null &&
-                          item.createdBy == widget.currentUserId)
+                          widget.currentUserId != null &&
+                          (item.personIds.contains(widget.currentUserId) ||
+                           item.reviewerIds.contains(widget.currentUserId)))
                         _buildMoveToIdeaButton(item),
                     ],
                   ),
