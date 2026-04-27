@@ -271,6 +271,8 @@ class _ClientsScreenState extends State<ClientsScreen> {
   bool _loading = true;
   String? _error;
   final Set<String> _deletingClientIds = {};
+  final Set<String> _selectedClientIds = {};
+  bool _bulkDeleting = false;
 
   late final ApiClient _api = context.read<ApiClient>();
 
@@ -374,6 +376,15 @@ class _ClientsScreenState extends State<ClientsScreen> {
             _loadClients();
           },
         ),
+        if (_selectedClientIds.isNotEmpty)
+          _BulkDeleteBar(
+            selectedCount: _selectedClientIds.length,
+            totalVisible: _clients.length,
+            deleting: _bulkDeleting,
+            onSelectAll: _selectAllVisibleClients,
+            onClear: _clearClientSelection,
+            onDelete: _deleteSelectedClients,
+          ),
         Expanded(
           child: _loading
               ? const Center(child: CircularProgressIndicator(color: _kPrimary))
@@ -385,7 +396,13 @@ class _ClientsScreenState extends State<ClientsScreen> {
                   clients: _clients,
                   selectedId: _selected?.id,
                   deletingIds: _deletingClientIds,
+                  selectedIds: _selectedClientIds,
+                  selectionMode: _selectedClientIds.isNotEmpty,
                   onTap: (c) {
+                    if (_selectedClientIds.isNotEmpty) {
+                      _toggleClientSelection(c.id);
+                      return;
+                    }
                     if (isMobile) {
                       setState(() => _selected = c);
                       _showDetailBottomSheet(context, c);
@@ -398,6 +415,7 @@ class _ClientsScreenState extends State<ClientsScreen> {
                   onDelete: (client) {
                     _deleteClient(client);
                   },
+                  onToggleSelection: _toggleClientSelection,
                 ),
         ),
       ],
@@ -574,6 +592,7 @@ class _ClientsScreenState extends State<ClientsScreen> {
       final stillExists = _clients.any((c) => c.id == client.id);
       setState(() {
         _deletingClientIds.remove(client.id);
+        _selectedClientIds.remove(client.id);
         if (_selected?.id == client.id && !stillExists) _selected = null;
       });
 
@@ -603,6 +622,128 @@ class _ClientsScreenState extends State<ClientsScreen> {
         ),
       );
       return false;
+    }
+  }
+
+  void _toggleClientSelection(String id) {
+    setState(() {
+      if (_selectedClientIds.contains(id)) {
+        _selectedClientIds.remove(id);
+      } else {
+        if (_selectedClientIds.length >= 50) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('You can delete up to 50 clients at once.'),
+              backgroundColor: _kRed,
+            ),
+          );
+          return;
+        }
+        _selectedClientIds.add(id);
+      }
+    });
+  }
+
+  void _selectAllVisibleClients() {
+    final ids = _clients.map((c) => c.id).take(50).toSet();
+    setState(() => _selectedClientIds
+      ..clear()
+      ..addAll(ids));
+    if (_clients.length > 50) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Selected the first 50 visible clients.'),
+        ),
+      );
+    }
+  }
+
+  void _clearClientSelection() {
+    setState(() => _selectedClientIds.clear());
+  }
+
+  Future<void> _deleteSelectedClients() async {
+    if (_bulkDeleting || _selectedClientIds.isEmpty) return;
+    final ids = _selectedClientIds.toList();
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          'Delete selected clients?',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        content: Text(
+          'This will permanently delete ${ids.length} selected client(s). This action cannot be undone.',
+          style: const TextStyle(fontSize: 13, color: _kMuted),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: _kRed),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    if (!mounted) return;
+
+    setState(() {
+      _bulkDeleting = true;
+      _deletingClientIds.addAll(ids);
+    });
+
+    try {
+      final res = await _api.bulkDeleteClients(ids);
+      final statusCode = res.statusCode ?? 0;
+      if (statusCode < 200 || statusCode >= 300) {
+        throw Exception('Bulk delete failed with status $statusCode');
+      }
+
+      await _loadClients();
+      if (!mounted) return;
+
+      final remainingIds = _clients.map((c) => c.id).toSet();
+      final stillVisible = ids.where(remainingIds.contains).length;
+      setState(() {
+        _bulkDeleting = false;
+        _deletingClientIds.removeAll(ids);
+        _selectedClientIds.removeWhere((id) => !remainingIds.contains(id));
+        if (_selected != null && !remainingIds.contains(_selected!.id)) {
+          _selected = null;
+        }
+      });
+
+      final message = res.data is Map && (res.data as Map)['message'] is String
+          ? (res.data as Map)['message'] as String
+          : '${ids.length - stillVisible} client(s) deleted';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            stillVisible == 0
+                ? message
+                : '$message. $stillVisible still visible after refresh.',
+          ),
+          backgroundColor: stillVisible == 0 ? null : _kRed,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _bulkDeleting = false;
+        _deletingClientIds.removeAll(ids);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_extractErrorMessage(e)),
+          backgroundColor: _kRed,
+        ),
+      );
     }
   }
 
@@ -740,6 +881,7 @@ class _TopBar extends StatelessWidget {
       ),
     );
   }
+
 }
 
 // ─── Stats row ────────────────────────────────────────────────────────────────
@@ -1012,18 +1154,97 @@ class _FilterChip extends StatelessWidget {
 }
 
 // ─── Client list ──────────────────────────────────────────────────────────────
+class _BulkDeleteBar extends StatelessWidget {
+  final int selectedCount;
+  final int totalVisible;
+  final bool deleting;
+  final VoidCallback onSelectAll;
+  final VoidCallback onClear;
+  final VoidCallback onDelete;
+
+  const _BulkDeleteBar({
+    required this.selectedCount,
+    required this.totalVisible,
+    required this.deleting,
+    required this.onSelectAll,
+    required this.onClear,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: _kSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _kBorder),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.check_circle, size: 18, color: _kPrimary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '$selectedCount selected',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: _kText,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed:
+                deleting || selectedCount == totalVisible ? null : onSelectAll,
+            child: const Text('Select all'),
+          ),
+          const SizedBox(width: 6),
+          TextButton(
+            onPressed: deleting ? null : onClear,
+            child: const Text('Clear'),
+          ),
+          const SizedBox(width: 6),
+          FilledButton.icon(
+            onPressed: deleting ? null : onDelete,
+            style: FilledButton.styleFrom(backgroundColor: _kRed),
+            icon: deleting
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.delete_outline, size: 16),
+            label: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ClientList extends StatelessWidget {
   final List<Client> clients;
   final String? selectedId;
   final Set<String> deletingIds;
+  final Set<String> selectedIds;
+  final bool selectionMode;
   final ValueChanged<Client> onTap;
   final ValueChanged<Client> onDelete;
+  final ValueChanged<String> onToggleSelection;
   const _ClientList({
     required this.clients,
     required this.selectedId,
     required this.deletingIds,
+    required this.selectedIds,
+    required this.selectionMode,
     required this.onTap,
     required this.onDelete,
+    required this.onToggleSelection,
   });
 
   @override
@@ -1036,8 +1257,11 @@ class _ClientList extends StatelessWidget {
         client: clients[i],
         isSelected: clients[i].id == selectedId,
         isDeleting: deletingIds.contains(clients[i].id),
+        isChecked: selectedIds.contains(clients[i].id),
+        showCheckbox: selectionMode,
         onTap: () => onTap(clients[i]),
         onDelete: () => onDelete(clients[i]),
+        onToggleSelection: () => onToggleSelection(clients[i].id),
       ),
     );
   }
@@ -1048,14 +1272,20 @@ class _ClientCard extends StatefulWidget {
   final Client client;
   final bool isSelected;
   final bool isDeleting;
+  final bool isChecked;
+  final bool showCheckbox;
   final VoidCallback onTap;
   final VoidCallback onDelete;
+  final VoidCallback onToggleSelection;
   const _ClientCard({
     required this.client,
     required this.isSelected,
     required this.isDeleting,
+    required this.isChecked,
+    required this.showCheckbox,
     required this.onTap,
     required this.onDelete,
+    required this.onToggleSelection,
   });
 
   @override
@@ -1103,6 +1333,17 @@ class _ClientCardState extends State<_ClientCard> {
             children: [
               Row(
                 children: [
+                  if (widget.showCheckbox) ...[
+                    Checkbox(
+                      value: widget.isChecked,
+                      onChanged: widget.isDeleting
+                          ? null
+                          : (_) => widget.onToggleSelection(),
+                      activeColor: _kPrimary,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1129,6 +1370,27 @@ class _ClientCardState extends State<_ClientCard> {
                   ),
                   _StageBadge(stage: c.stage),
                   const SizedBox(width: 8),
+                  IconButton(
+                    onPressed:
+                        widget.isDeleting ? null : widget.onToggleSelection,
+                    tooltip: widget.isChecked
+                        ? 'Remove from selection'
+                        : 'Select client',
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 32,
+                    ),
+                    icon: Icon(
+                      widget.isChecked
+                          ? Icons.check_circle
+                          : Icons.check_circle_outline,
+                      size: 18,
+                      color: widget.isChecked ? _kPrimary : _kMuted,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
                   IconButton(
                     onPressed: widget.isDeleting ? null : widget.onDelete,
                     tooltip: 'Delete client',
