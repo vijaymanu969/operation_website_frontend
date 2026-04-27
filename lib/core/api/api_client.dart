@@ -431,7 +431,14 @@ class ApiClient {
   }
 
   Future<Response> deleteClient(String id) {
-    return dio.delete('/clients/$id');
+    return dio.delete(
+      '/clients/$id',
+      queryParameters: {'hard_delete': true},
+    );
+  }
+
+  Future<Response> bulkDeleteClients(List<String> ids) {
+    return dio.post('/clients/bulk-delete', data: {'ids': ids});
   }
 
   Future<Response> changeClientStage(String id, Map<String, dynamic> data) {

@@ -1042,10 +1042,10 @@ class _TasksScreenState extends State<TasksScreen> {
     setState(() => _selectedTask = item);
     showGeneralDialog(
       context: context,
-      barrierDismissible: true,
+      barrierDismissible: false,
       barrierLabel: 'Close',
       barrierColor: Colors.black45,
-      transitionDuration: const Duration(milliseconds: 200),
+      transitionDuration: const Duration(milliseconds: 80),
       transitionBuilder: (_, anim, _, child) => FadeTransition(
         opacity: anim,
         child: ScaleTransition(
@@ -2656,25 +2656,88 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   // a deactivated context (which would throw _dependents.isEmpty assertion).
   late final ApiClient _panelApi;
 
+  // Snapshot of editable fields at panel-open — used to revert on Cancel
+  // and to detect undo-to-original (which disables the Update button).
+  // Captured eagerly in initState (NOT via `late final` first-access init),
+  // because field-edit handlers mutate widget.item.* BEFORE calling
+  // _markPending, which would otherwise make the snapshot equal the
+  // post-change value.
+  late final String _origTitle;
+  late final String _origDescription;
+  late final Priority _origPriority;
+  late final DateTime? _origDate;
+  late final DateTime? _origEndDate;
+  late final List<String> _origPersonIds;
+  late final List<String> _origAssigneeNames;
+  late final List<String> _origReviewerIds;
+  late final List<String> _origReviewerNames;
+  late final List<String> _origTypeIds;
+  late final List<Map<String, dynamic>> _origTypes;
+
+  bool _hasPending      = false;
+
+  // Buffer a field change. No API call — only fires on Update.
+  // If the new value equals the original snapshot, drop the entry so a
+  // user who undoes their change disables the Update button again.
+  void _markPending(String key, dynamic value) {
+    final orig = _origValueFor(key);
+    if (_valuesEqual(value, orig)) {
+      _pendingEdits.remove(key);
+    } else {
+      _pendingEdits[key] = value;
+    }
+    final has = _pendingEdits.isNotEmpty;
+    if (has != _hasPending && mounted) setState(() => _hasPending = has);
+  }
+
+  // Map an API key back to the original-snapshot value (in API-shape) so
+  // we can detect when the user has reverted to where they started.
+  dynamic _origValueFor(String key) {
+    switch (key) {
+      case 'title':        return _origTitle;
+      case 'description':  return _origDescription;
+      case 'priority':     return _origPriority.apiValue;
+      case 'date':         return _origDate?.toIso8601String().substring(0, 10);
+      case 'end_date':     return _origEndDate?.toIso8601String().substring(0, 10);
+      case 'person_ids':   return _origPersonIds;
+      case 'reviewer_ids': return _origReviewerIds;
+      case 'type_ids':     return _origTypeIds;
+      default:             return null;
+    }
+  }
+
+  bool _valuesEqual(dynamic a, dynamic b) {
+    if (a == null && b == null) return true;
+    if (a == null || b == null) return false;
+    if (a is List && b is List) {
+      if (a.length != b.length) return false;
+      final sa = List.from(a)..sort();
+      final sb = List.from(b)..sort();
+      for (var i = 0; i < sa.length; i++) {
+        if (sa[i] != sb[i]) return false;
+      }
+      return true;
+    }
+    return a == b;
+  }
+
   @override
   void initState() {
     super.initState();
     _panelApi = context.read<ApiClient>();
-    _titleFocus.addListener(_flushOnBlur);
-    _descFocus.addListener(_flushOnBlur);
+    final item = widget.item;
+    _origTitle         = item.title;
+    _origDescription   = item.description;
+    _origPriority      = item.priority;
+    _origDate          = item.date;
+    _origEndDate       = item.endDate;
+    _origPersonIds     = List.from(item.personIds);
+    _origAssigneeNames = List.from(item.assigneeNames);
+    _origReviewerIds   = List.from(item.reviewerIds);
+    _origReviewerNames = List.from(item.reviewerNames);
+    _origTypeIds       = List.from(item.typeIds);
+    _origTypes         = item.types.map((t) => Map<String, dynamic>.from(t)).toList();
     _loadComments();
-  }
-
-  /// Called when title or description focus changes. If focus is LOST and we
-  /// have pending text edits, save them in one PUT. This replaces the old
-  /// keystroke-debounced save so that Shift+Enter / normal typing doesn't
-  /// spam the API or flood the activity feed.
-  void _flushOnBlur() {
-    if (_titleFocus.hasFocus || _descFocus.hasFocus) return;
-    if (_pendingEdits.isEmpty) return;
-    final data = Map<String, dynamic>.from(_pendingEdits);
-    _pendingEdits.clear();
-    _saveField(data);
   }
 
   Future<void> _loadComments() async {
@@ -2700,16 +2763,8 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     _personDebounce?.cancel();
     _reviewerDebounce?.cancel();
     _closeDateOverlay();
-    // Flush any pending title/description edits the user didn't blur away from.
-    if (_pendingEdits.isNotEmpty) {
-      final id = widget.item.backendId;
-      if (id != null) {
-        _panelApi.updateTask(id, Map<String, dynamic>.from(_pendingEdits));
-      }
-      _pendingEdits.clear();
-    }
-    _titleFocus.removeListener(_flushOnBlur);
-    _descFocus.removeListener(_flushOnBlur);
+    // No auto-flush on dispose — saves only happen via the Update button.
+    _pendingEdits.clear();
     _titleFocus.dispose();
     _descFocus.dispose();
     _titleCtrl.dispose();
@@ -2718,22 +2773,12 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     super.dispose();
   }
 
-  // Save immediately. After the update, re-sync the in-memory TaskItem from
-  // the server's response so the UI always reflects the persisted truth
-  // (e.g. multi-assignee/multi-type arrays the backend may dedupe or reorder).
+  // Buffer a field change. NOTHING is sent to the backend until the user
+  // explicitly presses the Update button. Cancel reverts everything from
+  // the snapshot taken when the panel opened. Goes through _markPending
+  // so reverts-to-original drop the key and disable the Update button.
   Future<void> _saveField(Map<String, dynamic> data) async {
-    final id = widget.item.backendId;
-    if (id == null) return;
-    try {
-      final res = await _panelApi.updateTask(id, data);
-      if (!mounted) return;
-      final json = res.data;
-      if (json is Map<String, dynamic>) {
-        _syncFromJson(json);
-      }
-    } catch (_) {
-      // silent — user sees their change; they can retry if needed
-    }
+    data.forEach((k, v) => _markPending(k, v));
   }
 
   /// Patch the existing TaskItem with fresh server data without replacing
@@ -2760,6 +2805,66 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
       item.pendingPauseRequest = fresh.pendingPauseRequest;
       item.pendingIdeaRequest  = fresh.pendingIdeaRequest;
     });
+    widget.onChanged();
+  }
+
+  // Cancel: revert any unsaved title/description edits, then close.
+  // Auto-saved fields (priority, dates, assignees, types) stay as-is —
+  // those persisted to the server the moment the user changed them.
+  // Cancel: revert ALL field changes from the snapshot, then close.
+  // Nothing was persisted to the server — every edit lived only in
+  // _pendingEdits — so reverting in-memory is enough.
+  void _cancelAndClose() {
+    final hadPending = _pendingEdits.isNotEmpty;
+    if (hadPending) {
+      final item = widget.item;
+      item.title         = _origTitle;
+      item.description   = _origDescription;
+      item.priority      = _origPriority;
+      item.date          = _origDate;
+      item.endDate       = _origEndDate;
+      item.personIds     = List.from(_origPersonIds);
+      item.assigneeNames = List.from(_origAssigneeNames);
+      item.reviewerIds   = List.from(_origReviewerIds);
+      item.reviewerNames = List.from(_origReviewerNames);
+      item.typeIds       = List.from(_origTypeIds);
+      item.types         = _origTypes.map((t) => Map<String, dynamic>.from(t)).toList();
+      _titleCtrl.text    = _origTitle;
+      _descCtrl.text     = _origDescription;
+      _pendingEdits.clear();
+      _hasPending = false;
+    }
+    widget.onClose();
+    if (hadPending) widget.onChanged();
+  }
+
+  // Update: send ALL pending edits in one PUT, then close. Fire-and-forget
+  // so the dialog closes instantly — the parent kanban already shows the
+  // optimistic state from in-place item mutations.
+  Future<void> _updateAndClose() async {
+    if (_pendingEdits.isEmpty) {
+      widget.onClose();
+      return;
+    }
+    final id = widget.item.backendId;
+    if (id == null) {
+      widget.onClose();
+      return;
+    }
+    final data = Map<String, dynamic>.from(_pendingEdits);
+    _pendingEdits.clear();
+    _hasPending = false;
+    final messenger = ScaffoldMessenger.of(context);
+    () async {
+      try {
+        await _panelApi.updateTask(id, data);
+      } catch (_) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Failed to save changes')),
+        );
+      }
+    }();
+    widget.onClose();
     widget.onChanged();
   }
 
@@ -3359,35 +3464,13 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
     if (_dateDirty) {
       _dateDirty = false;
       final item = widget.item;
-      final dateChanged   = item.date    != _pickerOpenDate;
+      final dateChanged    = item.date    != _pickerOpenDate;
       final endDateChanged = item.endDate != _pickerOpenEndDate;
       if (dateChanged || endDateChanged) {
-        final id = item.backendId;
-        if (id != null) {
-          () async {
-            try {
-              await _panelApi.updateTask(id, {
-                'date':     item.date?.toIso8601String().substring(0, 10),
-                'end_date': item.endDate?.toIso8601String().substring(0, 10),
-              });
-            } on DioException catch (e) {
-              if (!mounted) return;
-              String msg = 'Failed to update date';
-              final data = e.response?.data;
-              if (data is Map && data['error'] is String) {
-                msg = data['error'] as String;
-              } else if (e.response?.statusCode == 403) {
-                msg = 'Task date can no longer be changed (24h window expired). Only super admin can change it.';
-              }
-              setState(() {
-                item.date    = _pickerOpenDate;
-                item.endDate = _pickerOpenEndDate;
-              });
-              widget.onChanged();
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-            }
-          }();
-        }
+        _saveField({
+          'date':     item.date?.toIso8601String().substring(0, 10),
+          'end_date': item.endDate?.toIso8601String().substring(0, 10),
+        });
       }
     }
     if (mounted) setState(() {});
@@ -3397,32 +3480,50 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
   Widget build(BuildContext context) {
     final item = widget.item;
     return Column(
+      mainAxisSize:        MainAxisSize.min,
       crossAxisAlignment:  CrossAxisAlignment.start,
       children: [
-        // ── Header button row (delete only) ──────────────────────────────
-        if (widget.item.backendId != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 12, right: 12),
-            child: Align(
-              alignment: Alignment.topRight,
-              child: InkWell(
-                onTap:        _confirmDelete,
+        // ── Header button row: delete + close ────────────────────────────
+        Padding(
+          padding: const EdgeInsets.only(top: 12, right: 12, left: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              if (widget.item.backendId != null)
+                InkWell(
+                  onTap:        _confirmDelete,
+                  borderRadius: BorderRadius.circular(6),
+                  child: Container(
+                    width:  28, height: 28,
+                    decoration: BoxDecoration(
+                      color:        const Color(0xFFFEF2F2),
+                      borderRadius: BorderRadius.circular(6),
+                      border:       Border.all(color: const Color(0xFFFCA5A5)),
+                    ),
+                    child: const Icon(Icons.delete_outline_rounded, size: 14, color: Color(0xFFEF4444)),
+                  ),
+                ),
+              const SizedBox(width: 8),
+              InkWell(
+                onTap:        _cancelAndClose,
                 borderRadius: BorderRadius.circular(6),
                 child: Container(
                   width:  28, height: 28,
                   decoration: BoxDecoration(
-                    color:        const Color(0xFFFEF2F2),
+                    color:        Colors.white,
                     borderRadius: BorderRadius.circular(6),
-                    border:       Border.all(color: const Color(0xFFFCA5A5)),
+                    border:       Border.all(color: _kBorder),
                   ),
-                  child: const Icon(Icons.delete_outline_rounded, size: 14, color: Color(0xFFEF4444)),
+                  child: const Icon(Icons.close_rounded, size: 16, color: _kMuted),
                 ),
               ),
-            ),
+            ],
           ),
+        ),
 
         // ── Body ────────────────────────────────────────────────────────────
-        Expanded(
+        Flexible(
+          fit: FlexFit.loose,
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
             child: Column(
@@ -3447,8 +3548,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   ),
                   onChanged: (v) {
                     item.title = v;
-                    widget.onChanged();
-                    _pendingEdits['title'] = v; // flushed on blur
+                    _markPending('title', v); // flushed on Update
                   },
                 ),
                 const SizedBox(height: 4),
@@ -3472,8 +3572,7 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                   ),
                   onChanged: (v) {
                     item.description = v;
-                    widget.onChanged();
-                    _pendingEdits['description'] = v; // flushed on blur
+                    _markPending('description', v); // flushed on Update
                   },
                 ),
 
@@ -3807,6 +3906,37 @@ class _TaskDetailPanelState extends State<_TaskDetailPanel> {
                 ]),
               ],
             ),
+          ),
+        ),
+
+        // ── Footer: Cancel / Update buttons ─────────────────────────────
+        Container(
+          decoration: const BoxDecoration(
+            color:  _kSurface,
+            border: Border(top: BorderSide(color: _kBorder)),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                onPressed: _cancelAndClose,
+                child: const Text('Cancel', style: TextStyle(color: _kMuted)),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _kAccent,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: const Color(0xFFE5E7EB),
+                  disabledForegroundColor: _kMuted,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                onPressed: _hasPending ? _updateAndClose : null,
+                child: const Text('Update'),
+              ),
+            ],
           ),
         ),
       ],
