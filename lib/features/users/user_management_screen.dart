@@ -427,6 +427,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
         child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
           child: DataTable(
             headingRowColor: WidgetStateProperty.all(Colors.grey[50]),
             columnSpacing: 24,
@@ -582,12 +583,17 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
             ),
             const SizedBox(height: 20),
 
-            SwitchListTile(
-              title: const Text('Active', style: TextStyle(fontSize: 14)),
-              value: _formIsActive,
-              onChanged: (v) => setState(() => _formIsActive = v),
-              activeThumbColor: AppColors.accent,
-              contentPadding: EdgeInsets.zero,
+            Row(
+              children: [
+                const Expanded(
+                  child: Text('Active', style: TextStyle(fontSize: 14)),
+                ),
+                Switch(
+                  value: _formIsActive,
+                  onChanged: (v) => setState(() => _formIsActive = v),
+                  activeThumbColor: AppColors.accent,
+                ),
+              ],
             ),
             const Divider(height: 32),
 
@@ -628,29 +634,29 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
   Widget _buildPageAccessRow(String page) {
     final currentPerm = _formPageAccess[page];
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 6,
+        runSpacing: 6,
         children: [
           SizedBox(
-            width: 120,
+            width: 100,
             child: Text(
               page[0].toUpperCase() + page.substring(1),
               style: const TextStyle(fontSize: 14),
             ),
           ),
-          const SizedBox(width: 8),
           _PermissionChip(
             label: 'None',
             isSelected: currentPerm == null,
             onTap: () => setState(() => _formPageAccess[page] = null),
           ),
-          const SizedBox(width: 6),
           _PermissionChip(
             label: 'View',
             isSelected: currentPerm == 'view',
             onTap: () => setState(() => _formPageAccess[page] = 'view'),
           ),
-          const SizedBox(width: 6),
           _PermissionChip(
             label: 'Edit',
             isSelected: currentPerm == 'edit',

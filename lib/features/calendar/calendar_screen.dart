@@ -228,7 +228,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
                         viewing:     _viewing,
                         selected:    _selectedDay,
                         byDate:      _byDate,
-                        onPickDay:   (d) => setState(() => _selectedDay = d),
+                        compact:     isMobile,
+                        onPickDay:   (d) {
+                          setState(() => _selectedDay = d);
+                          if (isMobile) _showDayBottomSheet(d);
+                        },
                       ),
                       _View.week   => _WeekView(
                         start:     _rangeFor(_View.week, _viewing).start,
@@ -296,6 +300,83 @@ class _CalendarScreenState extends State<CalendarScreen> {
       context: context,
       builder: (ctx) => _EventDialog(event: e, onClose: () => Navigator.of(ctx).pop()),
     );
+  }
+
+  void _showDayBottomSheet(DateTime day) {
+    final events = _byDate[day] ?? const <_Event>[];
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        minChildSize: 0.3,
+        maxChildSize: 0.92,
+        builder: (ctx, scrollCtrl) => Container(
+          decoration: const BoxDecoration(
+            color: _kSurface,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: Column(children: [
+            Center(
+              child: Container(
+                width: 36, height: 4,
+                margin: const EdgeInsets.only(top: 10, bottom: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD1D5DB),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 8, 8),
+              child: Row(children: [
+                Expanded(
+                  child: Text(
+                    _longDate(day),
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: _kText),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18, color: _kMuted),
+                  onPressed: () => Navigator.of(ctx).pop(),
+                ),
+              ]),
+            ),
+            const Divider(height: 1, color: _kBorder),
+            Expanded(
+              child: events.isEmpty
+                  ? const Center(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.event_busy, size: 32, color: _kMuted),
+                        SizedBox(height: 8),
+                        Text('No events on this day', style: TextStyle(fontSize: 13, color: _kMuted)),
+                      ]),
+                    )
+                  : ListView.separated(
+                      controller: scrollCtrl,
+                      padding: const EdgeInsets.all(16),
+                      itemCount: events.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
+                      itemBuilder: (_, i) => _EventCard(
+                        event: events[i],
+                        onTap: () {
+                          Navigator.of(ctx).pop();
+                          _openEvent(events[i]);
+                        },
+                      ),
+                    ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  static String _longDate(DateTime d) {
+    const days   = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return '${days[d.weekday % 7]}, ${months[d.month - 1]} ${d.day}';
   }
 
   static String _shortDate(DateTime d) {
@@ -477,12 +558,14 @@ class _MonthGrid extends StatelessWidget {
   final DateTime?                       selected;
   final Map<DateTime, List<_Event>>     byDate;
   final ValueChanged<DateTime>          onPickDay;
+  final bool                            compact;
 
   const _MonthGrid({
     required this.viewing,
     required this.selected,
     required this.byDate,
     required this.onPickDay,
+    this.compact = false,
   });
 
   @override
@@ -505,19 +588,22 @@ class _MonthGrid extends StatelessWidget {
       cells.add((date: DateTime(viewing.year, viewing.month + 1, nextDay++), current: false));
     }
 
-    const dayLabels = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    final dayLabels = compact
+        ? const ['S','M','T','W','T','F','S']
+        : const ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    final pad = compact ? 8.0 : 20.0;
 
     return Column(children: [
       // Day-of-week header
       Padding(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 6),
+        padding: EdgeInsets.fromLTRB(pad, 0, pad, 6),
         child: Row(children: dayLabels.map((l) => Expanded(
           child: Center(child: Text(l, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _kMuted))),
         )).toList()),
       ),
       Expanded(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          padding: EdgeInsets.fromLTRB(pad, 0, pad, pad),
           child: Container(
             decoration: BoxDecoration(
               color: _kSurface,
@@ -546,6 +632,7 @@ class _MonthGrid extends StatelessWidget {
                           events:     events,
                           isToday:    isToday,
                           isSelected: isSelected,
+                          compact:    compact,
                           onTap:      () => onPickDay(c.date),
                         ),
                       );
@@ -566,6 +653,7 @@ class _DayCell extends StatelessWidget {
   final bool           current;
   final bool           isToday;
   final bool           isSelected;
+  final bool           compact;
   final List<_Event>   events;
   final VoidCallback   onTap;
 
@@ -576,6 +664,7 @@ class _DayCell extends StatelessWidget {
     required this.isSelected,
     required this.events,
     required this.onTap,
+    this.compact = false,
   });
 
   @override
@@ -587,51 +676,68 @@ class _DayCell extends StatelessWidget {
           color: isSelected ? _kPrimary.withValues(alpha: 0.06) : null,
           border: const Border(right: BorderSide(color: _kBorder), bottom: BorderSide(color: _kBorder)),
         ),
-        padding: const EdgeInsets.all(6),
+        padding: EdgeInsets.all(compact ? 3 : 6),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Row(children: [
-              Container(
-                width: 22, height: 22,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: isToday ? _kPrimary : null,
-                  shape: BoxShape.circle,
-                ),
-                child: Text('${date.day}',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: isToday ? FontWeight.w700 : FontWeight.w500,
-                      color: isToday ? Colors.white : (current ? _kText : _kMuted.withValues(alpha: 0.5)),
-                    )),
+            Container(
+              width: compact ? 24 : 22,
+              height: compact ? 24 : 22,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: isToday ? _kPrimary : null,
+                shape: BoxShape.circle,
               ),
-            ]),
+              child: Text('${date.day}',
+                  style: TextStyle(
+                    fontSize: compact ? 11 : 12,
+                    fontWeight: isToday ? FontWeight.w700 : FontWeight.w500,
+                    color: isToday ? Colors.white : (current ? _kText : _kMuted.withValues(alpha: 0.5)),
+                  )),
+            ),
             const SizedBox(height: 4),
-            ...events.take(3).map((e) => Padding(
-              padding: const EdgeInsets.only(bottom: 2),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                decoration: BoxDecoration(
-                  color: e.color.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(3),
+            if (compact) ...[
+              // Mobile: show up to 3 colored dots, then "+N"
+              if (events.isNotEmpty)
+                Wrap(
+                  spacing: 2, runSpacing: 2,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    ...events.take(3).map((e) => Container(
+                          width: 5, height: 5,
+                          decoration: BoxDecoration(color: e.color, shape: BoxShape.circle),
+                        )),
+                    if (events.length > 3)
+                      Text('+${events.length - 3}',
+                          style: const TextStyle(fontSize: 9, color: _kMuted, fontWeight: FontWeight.w600)),
+                  ],
                 ),
-                child: Row(children: [
-                  Container(width: 5, height: 5, decoration: BoxDecoration(color: e.color, shape: BoxShape.circle)),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      e.time != null ? '${e.time} ${e.title}' : e.title,
-                      maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 10, color: e.color, fontWeight: FontWeight.w500),
-                    ),
+            ] else ...[
+              ...events.take(3).map((e) => Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: e.color.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(3),
                   ),
-                ]),
-              ),
-            )),
-            if (events.length > 3)
-              Text('+${events.length - 3} more',
-                  style: const TextStyle(fontSize: 10, color: _kMuted, fontWeight: FontWeight.w500)),
+                  child: Row(children: [
+                    Container(width: 5, height: 5, decoration: BoxDecoration(color: e.color, shape: BoxShape.circle)),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        e.time != null ? '${e.time} ${e.title}' : e.title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 10, color: e.color, fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  ]),
+                ),
+              )),
+              if (events.length > 3)
+                Text('+${events.length - 3} more',
+                    style: const TextStyle(fontSize: 10, color: _kMuted, fontWeight: FontWeight.w500)),
+            ],
           ],
         ),
       ),
