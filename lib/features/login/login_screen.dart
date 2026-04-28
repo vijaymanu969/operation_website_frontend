@@ -69,6 +69,12 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  Image.asset(
+                    'assets/celume_logo.png',
+                    height: isMobile ? 64 : 88,
+                    fit: BoxFit.contain,
+                  ),
+                  SizedBox(height: isMobile ? 12 : 16),
                   Text(
                     'CELUME OPS',
                     style: TextStyle(

@@ -1,11 +1,11 @@
 {
-    "name": "operations_frontend",
-    "short_name": "operations_frontend",
+    "name": "Celume Ops",
+    "short_name": "Celume Ops",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Celume Studios Operations Dashboard",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
