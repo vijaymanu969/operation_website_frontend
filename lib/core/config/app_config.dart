@@ -14,4 +14,5 @@ class AppConfig {
   static const pageChat = 'chat';
   static const pageAnalytics = 'analytics';
   static const pageClients = 'clients';
+  static const pageAgents = 'agents';
 }

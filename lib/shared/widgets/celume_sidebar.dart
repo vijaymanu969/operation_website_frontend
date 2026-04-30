@@ -148,6 +148,13 @@ class _CelumeSidebarState extends State<CelumeSidebar> {
                     isActive: currentPath == '/clients',
                     onTap: () => _navigate(context, '/clients'),
                   ),
+                if (widget.user.hasPageAccess(AppConfig.pageAgents))
+                  _NavItem(
+                    icon: Icons.support_agent_outlined,
+                    label: 'Agents',
+                    isActive: currentPath == '/agents',
+                    onTap: () => _navigate(context, '/agents'),
+                  ),
                 if (widget.user.hasPageAccess(AppConfig.pageClients))
                   _NavItem(
                     icon: Icons.calendar_month_outlined,

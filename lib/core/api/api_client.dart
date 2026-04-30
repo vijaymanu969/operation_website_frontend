@@ -118,6 +118,26 @@ class ApiClient {
     return dio.put('/users/$id/access', data: {'pages': pages});
   }
 
+  // ── Agents ─────────────────────────────────────────────────────────────────
+
+  Future<Response> getAgents({String? search}) {
+    final params = <String, dynamic>{};
+    if (search != null && search.trim().isNotEmpty) params['search'] = search.trim();
+    return dio.get('/agents', queryParameters: params);
+  }
+
+  Future<Response> createAgent(Map<String, dynamic> data) {
+    return dio.post('/agents', data: data);
+  }
+
+  Future<Response> updateAgent(String id, Map<String, dynamic> data) {
+    return dio.put('/agents/$id', data: data);
+  }
+
+  Future<Response> deleteAgent(String id) {
+    return dio.delete('/agents/$id');
+  }
+
   // ── Tasks ──────────────────────────────────────────────────────────────────
 
   Future<Response> getTasks({Map<String, dynamic>? filters}) {
