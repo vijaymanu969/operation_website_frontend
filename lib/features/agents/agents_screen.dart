@@ -155,7 +155,14 @@ class _AgentsScreenState extends State<AgentsScreen> {
     final isEdit = existing != null;
     final cardCtl = TextEditingController(text: existing?.cardName ?? '');
     final agentCtl = TextEditingController(text: existing?.agentName ?? '');
-    final numberCtl = TextEditingController(text: existing?.agentNumber ?? '');
+    // Agent number is stored as full E.164 (prefix + 2-digit suffix). The
+    // input only edits the 2-digit suffix.
+    const prefix = '+9140453074';
+    final existingSuffix =
+        existing != null && existing.agentNumber.startsWith(prefix)
+            ? existing.agentNumber.substring(prefix.length)
+            : '';
+    final numberCtl = TextEditingController(text: existingSuffix);
     final campaignCtl = TextEditingController(text: existing?.campaignId ?? '');
     final apiKeyCtl = TextEditingController(text: existing?.apiKey ?? '');
     final formKey = GlobalKey<FormState>();
@@ -193,13 +200,18 @@ class _AgentsScreenState extends State<AgentsScreen> {
                   _Field(
                     label: 'Agent Number',
                     controller: numberCtl,
-                    hint: '+914045307441',
-                    keyboardType: TextInputType.phone,
+                    hint: 'XX',
+                    keyboardType: TextInputType.number,
+                    prefixText: '$prefix ',
+                    inputFormatters: [
+                      FilteringTextInputFormatter.digitsOnly,
+                      LengthLimitingTextInputFormatter(2),
+                    ],
                     validator: (v) {
                       final t = (v ?? '').trim();
                       if (t.isEmpty) return 'Required';
-                      if (!RegExp(r'^\+\d{8,15}$').hasMatch(t)) {
-                        return 'E.164 format, e.g. +914045307441';
+                      if (!RegExp(r'^\d{2}$').hasMatch(t)) {
+                        return 'Enter exactly 2 digits';
                       }
                       return null;
                     },
@@ -248,11 +260,12 @@ class _AgentsScreenState extends State<AgentsScreen> {
     );
 
     if (saved == true) {
+      final fullNumber = '$prefix${numberCtl.text.trim()}';
       setState(() {
         if (isEdit) {
           existing.cardName = cardCtl.text.trim();
           existing.agentName = agentCtl.text.trim();
-          existing.agentNumber = numberCtl.text.trim();
+          existing.agentNumber = fullNumber;
           existing.campaignId = campaignCtl.text.trim();
           existing.apiKey = apiKeyCtl.text.trim();
         } else {
@@ -260,7 +273,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
             id: DateTime.now().microsecondsSinceEpoch.toString(),
             cardName: cardCtl.text.trim(),
             agentName: agentCtl.text.trim(),
-            agentNumber: numberCtl.text.trim(),
+            agentNumber: fullNumber,
             campaignId: campaignCtl.text.trim(),
             apiKey: apiKeyCtl.text.trim(),
             createdAt: DateTime.now().toUtc().toIso8601String(),
@@ -828,6 +841,8 @@ class _Field extends StatelessWidget {
   final TextInputType? keyboardType;
   final String? Function(String?)? validator;
   final bool obscure;
+  final String? prefixText;
+  final List<TextInputFormatter>? inputFormatters;
 
   const _Field({
     required this.label,
@@ -836,6 +851,8 @@ class _Field extends StatelessWidget {
     this.keyboardType,
     this.validator,
     this.obscure = false,
+    this.prefixText,
+    this.inputFormatters,
   });
 
   @override
@@ -852,9 +869,13 @@ class _Field extends StatelessWidget {
           keyboardType: keyboardType,
           validator: validator,
           obscureText: obscure,
+          inputFormatters: inputFormatters,
           decoration: InputDecoration(
             hintText: hint,
             hintStyle: const TextStyle(color: _kMuted, fontSize: 13),
+            prefixText: prefixText,
+            prefixStyle: const TextStyle(
+                color: _kText, fontSize: 14, fontWeight: FontWeight.w500),
             isDense: true,
             contentPadding:
                 const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
