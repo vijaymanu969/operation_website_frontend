@@ -169,6 +169,13 @@ class _CelumeSidebarState extends State<CelumeSidebar> {
                     isActive: currentPath == '/users',
                     onTap: () => _navigate(context, '/users'),
                   ),
+                if (widget.user.role == UserRole.superAdmin)
+                  _NavItem(
+                    icon: Icons.campaign_outlined,
+                    label: 'Updates',
+                    isActive: currentPath == '/updates',
+                    onTap: () => _navigate(context, '/updates'),
+                  ),
               ],
             ),
           ),

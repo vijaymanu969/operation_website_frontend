@@ -118,24 +118,37 @@ class ApiClient {
     return dio.put('/users/$id/access', data: {'pages': pages});
   }
 
-  // ── Agents ─────────────────────────────────────────────────────────────────
+  // ── Dashboard updates / changelog ──────────────────────────────────────────
 
-  Future<Response> getAgents({String? search}) {
-    final params = <String, dynamic>{};
-    if (search != null && search.trim().isNotEmpty) params['search'] = search.trim();
-    return dio.get('/agents', queryParameters: params);
+  /// Returns updates that the current user has not yet acknowledged.
+  Future<Response> getUnreadDashboardUpdates() {
+    return dio.get('/dashboard/updates', queryParameters: {'unread': true});
   }
 
-  Future<Response> createAgent(Map<String, dynamic> data) {
-    return dio.post('/agents', data: data);
+  /// Marks a single update as read for the current user.
+  Future<Response> acknowledgeDashboardUpdate(String id) {
+    return dio.post('/dashboard/updates/$id/acknowledge');
   }
 
-  Future<Response> updateAgent(String id, Map<String, dynamic> data) {
-    return dio.put('/agents/$id', data: data);
+  // Admin (super_admin only)
+  Future<Response> getDashboardUpdatesAdmin() {
+    return dio.get('/dashboard/updates/admin');
   }
 
-  Future<Response> deleteAgent(String id) {
-    return dio.delete('/agents/$id');
+  Future<Response> createDashboardUpdate(Map<String, dynamic> data) {
+    return dio.post('/dashboard/updates', data: data);
+  }
+
+  Future<Response> updateDashboardUpdate(String id, Map<String, dynamic> data) {
+    return dio.put('/dashboard/updates/$id', data: data);
+  }
+
+  Future<Response> resetDashboardUpdateAcks(String id) {
+    return dio.post('/dashboard/updates/$id/reset-acks');
+  }
+
+  Future<Response> deleteDashboardUpdate(String id) {
+    return dio.delete('/dashboard/updates/$id');
   }
 
   // ── Tasks ──────────────────────────────────────────────────────────────────

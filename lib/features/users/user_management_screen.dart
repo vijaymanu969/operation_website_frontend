@@ -37,6 +37,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
     AppConfig.pageChat,
     AppConfig.pageAnalytics,
     AppConfig.pageClients,
+    AppConfig.pageAgents,
   ];
 
   ApiClient get _api => context.read<ApiClient>();
@@ -540,13 +541,18 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
             DropdownButtonFormField<UserRole>(
               initialValue: _formRole,
               decoration: _inputDecoration('Role'),
+              // super_admin can't be assigned, but if we're editing an existing
+              // super_admin user we must still include it as an item (and lock the field).
               items: UserRole.values
-                  .where((r) => r != UserRole.superAdmin)
+                  .where((r) =>
+                      r != UserRole.superAdmin || _formRole == UserRole.superAdmin)
                   .map((r) => DropdownMenuItem(value: r, child: Text(r.displayName)))
                   .toList(),
-              onChanged: (v) {
-                if (v != null) setState(() => _formRole = v);
-              },
+              onChanged: _formRole == UserRole.superAdmin
+                  ? null
+                  : (v) {
+                      if (v != null) setState(() => _formRole = v);
+                    },
             ),
             const SizedBox(height: 16),
 

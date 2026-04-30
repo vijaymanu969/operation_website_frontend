@@ -13,6 +13,7 @@ import '../../features/calendar/calendar_screen.dart';
 import '../../features/clients/clients_screen.dart';
 import '../../features/agents/agents_screen.dart';
 import '../../features/users/user_management_screen.dart';
+import '../../features/updates/updates_admin_screen.dart';
 import '../../shared/widgets/app_shell.dart';
 
 class AppRouter {
@@ -47,8 +48,9 @@ class AppRouter {
           return '/dashboard';
         }
 
-        // /users is super_admin only
-        if (location == '/users' && user.role != UserRole.superAdmin) {
+        // /users and /updates are super_admin only
+        if ((location == '/users' || location == '/updates') &&
+            user.role != UserRole.superAdmin) {
           return '/dashboard';
         }
       }
@@ -104,6 +106,10 @@ class AppRouter {
           GoRoute(
             path: '/users',
             builder: (context, state) => const UserManagementScreen(),
+          ),
+          GoRoute(
+            path: '/updates',
+            builder: (context, state) => const UpdatesAdminScreen(),
           ),
         ],
       ),
