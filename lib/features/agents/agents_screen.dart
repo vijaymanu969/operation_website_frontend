@@ -1,12 +1,10 @@
-import 'dart:convert';
-
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../core/config/app_config.dart';
+import '../../core/api/api_client.dart';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 
@@ -17,7 +15,7 @@ const _kSurface = Colors.white;
 const _kMuted = Color(0xFF6B7280);
 const _kText = Color(0xFF1A1A1A);
 
-const _kStorageKey = 'testCallCards';
+const String _kPhonePrefix = '+9140453074';
 
 // ─── Model ────────────────────────────────────────────────────────────────────
 
@@ -27,8 +25,7 @@ class TestCallCard {
   String agentName;
   String agentNumber;
   String campaignId;
-  String apiKey;
-  String createdAt;
+  String? createdAt;
 
   TestCallCard({
     required this.id,
@@ -36,28 +33,16 @@ class TestCallCard {
     required this.agentName,
     required this.agentNumber,
     required this.campaignId,
-    required this.apiKey,
-    required this.createdAt,
+    this.createdAt,
   });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'cardName': cardName,
-        'agentName': agentName,
-        'agentNumber': agentNumber,
-        'campaignId': campaignId,
-        'apiKey': apiKey,
-        'createdAt': createdAt,
-      };
 
   factory TestCallCard.fromJson(Map<String, dynamic> j) => TestCallCard(
         id: (j['id'] ?? '').toString(),
-        cardName: (j['cardName'] ?? '').toString(),
-        agentName: (j['agentName'] ?? '').toString(),
-        agentNumber: (j['agentNumber'] ?? '').toString(),
-        campaignId: (j['campaignId'] ?? '').toString(),
-        apiKey: (j['apiKey'] ?? '').toString(),
-        createdAt: (j['createdAt'] ?? '').toString(),
+        cardName: (j['card_name'] ?? '').toString(),
+        agentName: (j['agent_name'] ?? '').toString(),
+        agentNumber: (j['agent_number'] ?? '').toString(),
+        campaignId: (j['campaign_id'] ?? '').toString(),
+        createdAt: j['created_at']?.toString(),
       );
 }
 
@@ -73,54 +58,79 @@ class AgentsScreen extends StatefulWidget {
 class _AgentsScreenState extends State<AgentsScreen> {
   List<TestCallCard> _cards = [];
   bool _loading = true;
+  String? _error;
 
-  late final Dio _platformDio = Dio(BaseOptions(
-    baseUrl: AppConfig.aiPlatformBaseUrl,
-    connectTimeout: const Duration(seconds: 15),
-    receiveTimeout: const Duration(seconds: 30),
-    headers: {'Content-Type': 'application/json'},
-  ));
+  ApiClient get _api => context.read<ApiClient>();
 
   bool get _isMobile => MediaQuery.of(context).size.width < 700;
 
   @override
   void initState() {
     super.initState();
-    _loadCards();
+    _load();
   }
 
-  // ── Persistence ──────────────────────────────────────────────────────────
+  // ── Load ─────────────────────────────────────────────────────────────────
 
-  Future<void> _loadCards() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_kStorageKey);
-    List<TestCallCard> cards = [];
-    if (raw != null && raw.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(raw);
-        if (decoded is List) {
-          cards = decoded
-              .map((e) => TestCallCard.fromJson(Map<String, dynamic>.from(e as Map)))
-              .toList();
-        }
-      } catch (_) {/* ignore bad payload */}
-    }
-    if (!mounted) return;
+  Future<void> _load() async {
     setState(() {
-      _cards = cards;
-      _loading = false;
+      _loading = true;
+      _error = null;
     });
+    try {
+      final res = await _api.getTestCallCards();
+      final root = res.data is Map ? (res.data['data'] ?? res.data) : res.data;
+      List? raw;
+      if (root is List) {
+        raw = root;
+      } else if (root is Map) {
+        raw = (root['cards'] ?? root['items'] ?? root['rows']) as List?;
+      }
+      final list = (raw ?? [])
+          .map((e) =>
+              TestCallCard.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _cards = list;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _readableError(e, fallback: 'Failed to load cards');
+      });
+    }
   }
 
-  Future<void> _saveCards() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _kStorageKey,
-      jsonEncode(_cards.map((c) => c.toJson()).toList()),
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  String _readableError(Object e, {required String fallback}) {
+    if (e is DioException) {
+      final body = e.response?.data;
+      if (body is Map) {
+        final msg = (body['error'] ?? body['message'])?.toString();
+        if (msg != null && msg.isNotEmpty) return msg;
+      }
+      if (e.response?.statusCode == 403) {
+        return 'You do not have access to this action';
+      }
+    }
+    return fallback;
+  }
+
+  void _toast(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: isError ? Colors.red[600] : null,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 3),
+      ),
     );
   }
-
-  // ── Toast helper ─────────────────────────────────────────────────────────
 
   Future<void> _dialNumber(String number) async {
     final cleaned = number.replaceAll(RegExp(r'[^0-9+]'), '');
@@ -137,34 +147,20 @@ class _AgentsScreenState extends State<AgentsScreen> {
     _toast('Copied $number');
   }
 
-  void _toast(String msg, {bool isError = false}) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        backgroundColor: isError ? Colors.red[600] : null,
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 3),
-      ),
-    );
-  }
-
   // ── Card create / edit / delete ──────────────────────────────────────────
 
   Future<void> _showCardDialog({TestCallCard? existing}) async {
     final isEdit = existing != null;
     final cardCtl = TextEditingController(text: existing?.cardName ?? '');
     final agentCtl = TextEditingController(text: existing?.agentName ?? '');
-    // Agent number is stored as full E.164 (prefix + 2-digit suffix). The
-    // input only edits the 2-digit suffix.
-    const prefix = '+9140453074';
+
     final existingSuffix =
-        existing != null && existing.agentNumber.startsWith(prefix)
-            ? existing.agentNumber.substring(prefix.length)
+        existing != null && existing.agentNumber.startsWith(_kPhonePrefix)
+            ? existing.agentNumber.substring(_kPhonePrefix.length)
             : '';
     final numberCtl = TextEditingController(text: existingSuffix);
     final campaignCtl = TextEditingController(text: existing?.campaignId ?? '');
-    final apiKeyCtl = TextEditingController(text: existing?.apiKey ?? '');
+    final apiKeyCtl = TextEditingController();
     final formKey = GlobalKey<FormState>();
 
     final saved = await showDialog<bool>(
@@ -202,7 +198,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
                     controller: numberCtl,
                     hint: 'XX',
                     keyboardType: TextInputType.number,
-                    prefixText: '$prefix ',
+                    prefixText: '$_kPhonePrefix ',
                     inputFormatters: [
                       FilteringTextInputFormatter.digitsOnly,
                       LengthLimitingTextInputFormatter(2),
@@ -227,9 +223,14 @@ class _AgentsScreenState extends State<AgentsScreen> {
                   _Field(
                     label: 'API Key',
                     controller: apiKeyCtl,
-                    hint: 'Organization API key',
+                    hint: isEdit
+                        ? 'Leave blank to keep existing key'
+                        : 'Organization API key',
                     obscure: true,
-                    validator: _required,
+                    validator: (v) {
+                      if (isEdit) return null; // optional on edit
+                      return _required(v);
+                    },
                   ),
                 ],
               ),
@@ -259,28 +260,36 @@ class _AgentsScreenState extends State<AgentsScreen> {
       ),
     );
 
-    if (saved == true) {
-      final fullNumber = '$prefix${numberCtl.text.trim()}';
-      setState(() {
-        if (isEdit) {
-          existing.cardName = cardCtl.text.trim();
-          existing.agentName = agentCtl.text.trim();
-          existing.agentNumber = fullNumber;
-          existing.campaignId = campaignCtl.text.trim();
-          existing.apiKey = apiKeyCtl.text.trim();
-        } else {
-          _cards.add(TestCallCard(
-            id: DateTime.now().microsecondsSinceEpoch.toString(),
-            cardName: cardCtl.text.trim(),
-            agentName: agentCtl.text.trim(),
-            agentNumber: fullNumber,
-            campaignId: campaignCtl.text.trim(),
-            apiKey: apiKeyCtl.text.trim(),
-            createdAt: DateTime.now().toUtc().toIso8601String(),
-          ));
-        }
-      });
-      await _saveCards();
+    if (saved != true) return;
+
+    final fullNumber = '$_kPhonePrefix${numberCtl.text.trim()}';
+    final apiKey = apiKeyCtl.text.trim();
+
+    final payload = <String, dynamic>{
+      'card_name': cardCtl.text.trim(),
+      'agent_name': agentCtl.text.trim(),
+      'agent_number': fullNumber,
+      'campaign_id': campaignCtl.text.trim(),
+    };
+    if (apiKey.isNotEmpty || !isEdit) {
+      payload['api_key'] = apiKey;
+    }
+
+    try {
+      if (isEdit) {
+        await _api.updateTestCallCard(existing.id, payload);
+        _toast('Card saved');
+      } else {
+        await _api.createTestCallCard(payload);
+        _toast('Card created');
+      }
+      await _load();
+    } catch (e) {
+      _toast(
+        _readableError(e,
+            fallback: isEdit ? 'Failed to save card' : 'Failed to create card'),
+        isError: true,
+      );
     }
   }
 
@@ -319,9 +328,13 @@ class _AgentsScreenState extends State<AgentsScreen> {
         ],
       ),
     );
-    if (ok == true) {
-      setState(() => card.cardName = ctl.text.trim());
-      await _saveCards();
+    if (ok != true) return;
+    try {
+      await _api.updateTestCallCard(card.id, {'card_name': ctl.text.trim()});
+      await _load();
+    } catch (e) {
+      _toast(_readableError(e, fallback: 'Failed to rename card'),
+          isError: true);
     }
   }
 
@@ -331,7 +344,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
       builder: (ctx) => AlertDialog(
         title: const Text('Delete card?'),
         content: Text(
-            'Remove "${card.cardName}"? This only deletes the saved card, not anything on the backend.'),
+            'Remove "${card.cardName}"? This deletes the card for everyone.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.of(ctx).pop(false),
@@ -343,9 +356,14 @@ class _AgentsScreenState extends State<AgentsScreen> {
         ],
       ),
     );
-    if (ok == true) {
-      setState(() => _cards.removeWhere((c) => c.id == card.id));
-      await _saveCards();
+    if (ok != true) return;
+    try {
+      await _api.deleteTestCallCard(card.id);
+      _toast('Card deleted');
+      await _load();
+    } catch (e) {
+      _toast(_readableError(e, fallback: 'Failed to delete card'),
+          isError: true);
     }
   }
 
@@ -467,42 +485,36 @@ class _AgentsScreenState extends State<AgentsScreen> {
     required bool replace,
   }) async {
     try {
-      final res = await _platformDio.post(
-        '/api/v1/campaigns/${card.campaignId}/test-call',
-        data: {
-          'numbers': [number],
-          'replace': replace,
-        },
-        options: Options(headers: {'x-api-key': card.apiKey}),
+      final res = await _api.dispatchTestCall(
+        card.id,
+        number: number,
+        replace: replace,
       );
+      // Backend forwards the AI platform response as-is.
+      // Expected shape: { results: [{ phone_number, success, error?, to? }], message? }
       final data = res.data;
+      Map? envelope;
       if (data is Map) {
-        final results = data['results'];
+        envelope = data['data'] is Map ? data['data'] as Map : data;
+      }
+      if (envelope != null) {
+        final results = envelope['results'];
         if (results is List && results.isNotEmpty) {
           final first = Map<String, dynamic>.from(results.first as Map);
           final ok = first['success'] == true;
           if (ok) {
-            return _CallOutcome.ok(toNumber: first['to']?.toString() ?? number);
+            return _CallOutcome.ok(
+                toNumber: first['to']?.toString() ?? number);
           }
           return _CallOutcome.fail(
               first['error']?.toString() ?? 'Call dispatch failed');
         }
         return _CallOutcome.fail(
-            data['message']?.toString() ?? 'Unexpected response shape');
+            envelope['message']?.toString() ?? 'Unexpected response');
       }
       return _CallOutcome.fail('Unexpected response');
-    } on DioException catch (e) {
-      final body = e.response?.data;
-      String? msg;
-      if (body is Map) {
-        msg = (body['error'] ?? body['message'])?.toString();
-      } else if (body is String && body.isNotEmpty) {
-        msg = body;
-      }
-      msg ??= e.message ?? 'Network error';
-      return _CallOutcome.fail('${e.response?.statusCode ?? ''} $msg'.trim());
     } catch (e) {
-      return _CallOutcome.fail(e.toString());
+      return _CallOutcome.fail(_readableError(e, fallback: 'Network error'));
     }
   }
 
@@ -525,9 +537,11 @@ class _AgentsScreenState extends State<AgentsScreen> {
                 child: _loading
                     ? const Center(
                         child: CircularProgressIndicator(color: _kPrimary))
-                    : _cards.isEmpty
-                        ? _buildEmpty()
-                        : _buildGrid(),
+                    : _error != null
+                        ? _buildError()
+                        : _cards.isEmpty
+                            ? _buildEmpty()
+                            : _buildGrid(),
               ),
             ],
           ),
@@ -554,6 +568,12 @@ class _AgentsScreenState extends State<AgentsScreen> {
             ],
           ),
         ),
+        IconButton(
+          tooltip: 'Refresh',
+          onPressed: _load,
+          icon: const Icon(Icons.refresh, color: _kMuted),
+        ),
+        const SizedBox(width: 4),
         ElevatedButton.icon(
           icon: const Icon(Icons.add, size: 18),
           label: Text(_isMobile ? 'New' : 'New Card'),
@@ -584,6 +604,27 @@ class _AgentsScreenState extends State<AgentsScreen> {
           const SizedBox(height: 4),
           const Text('Create your first test call card to get started.',
               style: TextStyle(color: _kMuted, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildError() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline, size: 56, color: Colors.red),
+          const SizedBox(height: 12),
+          Text(_error ?? 'Something went wrong',
+              style: const TextStyle(color: _kMuted, fontSize: 14)),
+          const SizedBox(height: 12),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: _kPrimary, foregroundColor: Colors.white),
+            onPressed: _load,
+            child: const Text('Retry'),
+          ),
         ],
       ),
     );

@@ -118,6 +118,35 @@ class ApiClient {
     return dio.put('/users/$id/access', data: {'pages': pages});
   }
 
+  // ── Test call cards ────────────────────────────────────────────────────────
+
+  Future<Response> getTestCallCards() {
+    return dio.get('/test-call-cards');
+  }
+
+  Future<Response> createTestCallCard(Map<String, dynamic> data) {
+    return dio.post('/test-call-cards', data: data);
+  }
+
+  Future<Response> updateTestCallCard(String id, Map<String, dynamic> data) {
+    return dio.put('/test-call-cards/$id', data: data);
+  }
+
+  Future<Response> deleteTestCallCard(String id) {
+    return dio.delete('/test-call-cards/$id');
+  }
+
+  Future<Response> dispatchTestCall(
+    String id, {
+    required String number,
+    required bool replace,
+  }) {
+    return dio.post(
+      '/test-call-cards/$id/dispatch',
+      data: {'number': number, 'replace': replace},
+    );
+  }
+
   // ── Dashboard updates / changelog ──────────────────────────────────────────
 
   /// Returns updates that the current user has not yet acknowledged.
