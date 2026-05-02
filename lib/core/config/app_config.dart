@@ -8,12 +8,10 @@ class AppConfig {
       defaultValue: 'https://operations.conveylabs.ai',
   );
 
-  // AI agent platform — used by the Test Call Cards page.
-  // Override with --dart-define=AI_PLATFORM_BASE_URL=https://your-host
-  static const aiPlatformBaseUrl = String.fromEnvironment(
-    'AI_PLATFORM_BASE_URL',
-    defaultValue: 'https://api.conveylabs.ai',
-  );
+  // AI platform values are loaded from lib/.env at runtime via flutter_dotenv.
+  // See AgentsScreen for usage. NOTE: anything in .env is still bundled into
+  // the web build and visible to anyone who loads the app — for real secrecy,
+  // proxy these calls through the operations backend.
 
   // Page names — must match what backend stores in ops_page_access
   static const pageTasks = 'tasks';

@@ -371,8 +371,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
 
   Future<void> _showCallPopup(TestCallCard card) async {
     final phoneCtl = TextEditingController(text: '+91');
-    bool replace = false;
+    final nameCtl = TextEditingController();
+    final reasonCtl = TextEditingController();
     bool sending = false;
+    bool replaceExisting = false;
     final formKey = GlobalKey<FormState>();
 
     await showDialog<void>(
@@ -388,48 +390,71 @@ class _AgentsScreenState extends State<AgentsScreen> {
                   fontWeight: FontWeight.w600, color: _kText, fontSize: 18)),
           content: SizedBox(
             width: 420,
-            child: Form(
-              key: formKey,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _Field(
-                    label: 'Phone Number',
-                    controller: phoneCtl,
-                    hint: '+917075527199',
-                    keyboardType: TextInputType.phone,
-                    validator: (v) {
-                      final t = (v ?? '').trim();
-                      if (t.isEmpty) return 'Required';
-                      if (!RegExp(r'^\+\d{8,15}$').hasMatch(t)) {
-                        return 'E.164 format, e.g. +917075527199';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Checkbox(
-                        value: replace,
-                        activeColor: _kPrimary,
-                        onChanged: sending
-                            ? null
-                            : (v) => setLocal(() => replace = v ?? false),
-                      ),
-                      const Expanded(
-                        child: Text('Replace existing lead for this number',
-                            style: TextStyle(color: _kText, fontSize: 13)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'From: ${card.agentNumber}  ·  Campaign: ${card.campaignId}',
-                    style: const TextStyle(color: _kMuted, fontSize: 11),
-                  ),
-                ],
+            child: SingleChildScrollView(
+              child: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _Field(
+                      label: 'Phone Number',
+                      controller: phoneCtl,
+                      hint: '+917075527199',
+                      keyboardType: TextInputType.phone,
+                      validator: (v) {
+                        final t = (v ?? '').trim();
+                        if (t.isEmpty) return 'Required';
+                        if (!RegExp(r'^\+\d{8,15}$').hasMatch(t)) {
+                          return 'E.164 format, e.g. +917075527199';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _Field(
+                      label: 'Name (optional)',
+                      controller: nameCtl,
+                      hint: 'Lead name',
+                    ),
+                    const SizedBox(height: 12),
+                    _Field(
+                      label: 'Call Reason (optional)',
+                      controller: reasonCtl,
+                      hint: 'Why are you calling?',
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'From: ${card.agentNumber}  ·  Campaign: ${card.campaignId}',
+                      style: const TextStyle(color: _kMuted, fontSize: 11),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: Checkbox(
+                            value: replaceExisting,
+                            activeColor: _kPrimary,
+                            onChanged: sending
+                                ? null
+                                : (value) => setLocal(
+                                      () => replaceExisting = value ?? false,
+                                    ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            'Replace existing lead for this number',
+                            style: TextStyle(color: _kText, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -450,10 +475,14 @@ class _AgentsScreenState extends State<AgentsScreen> {
                   : () async {
                       if (!(formKey.currentState?.validate() ?? false)) return;
                       setLocal(() => sending = true);
+                      final name = nameCtl.text.trim();
+                      final reason = reasonCtl.text.trim();
                       final result = await _dispatchCall(
                         card: card,
                         number: phoneCtl.text.trim(),
-                        replace: replace,
+                        replace: replaceExisting,
+                        callReason: reason.isEmpty ? null : reason,
+                        name: name.isEmpty ? null : name,
                       );
                       if (ctx.mounted) Navigator.of(ctx).pop();
                       if (!mounted) return;
@@ -483,15 +512,19 @@ class _AgentsScreenState extends State<AgentsScreen> {
     required TestCallCard card,
     required String number,
     required bool replace,
+    required String? callReason,
+    required String? name,
   }) async {
     try {
-      final res = await _api.dispatchTestCall(
+      // Server-side proxy: ops backend forwards the SALES response as-is.
+      final res = await _api.dispatchSalesTestCall(
         card.id,
         number: number,
         replace: replace,
+        callReason: callReason,
+        name: name,
       );
-      // Backend forwards the AI platform response as-is.
-      // Expected shape: { results: [{ phone_number, success, error?, to? }], message? }
+
       final data = res.data;
       Map? envelope;
       if (data is Map) {
@@ -509,12 +542,25 @@ class _AgentsScreenState extends State<AgentsScreen> {
           return _CallOutcome.fail(
               first['error']?.toString() ?? 'Call dispatch failed');
         }
-        return _CallOutcome.fail(
-            envelope['message']?.toString() ?? 'Unexpected response');
+        // Some responses may only have a top-level message without results.
+        final msg = envelope['message']?.toString();
+        if (msg != null && msg.isNotEmpty) {
+          return _CallOutcome.ok(toNumber: number);
+        }
       }
-      return _CallOutcome.fail('Unexpected response');
+      return _CallOutcome.ok(toNumber: number);
+    } on DioException catch (e) {
+      final body = e.response?.data;
+      String? msg;
+      if (body is Map) {
+        msg = (body['error'] ?? body['message'])?.toString();
+      } else if (body is String && body.isNotEmpty) {
+        msg = body;
+      }
+      msg ??= e.message ?? 'Network error';
+      return _CallOutcome.fail('${e.response?.statusCode ?? ''} $msg'.trim());
     } catch (e) {
-      return _CallOutcome.fail(_readableError(e, fallback: 'Network error'));
+      return _CallOutcome.fail(e.toString());
     }
   }
 

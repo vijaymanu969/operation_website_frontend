@@ -147,6 +147,26 @@ class ApiClient {
     );
   }
 
+  /// Server-side proxy to the SALES microservice. Admin key lives on the ops
+  /// backend — frontend never sees it.
+  Future<Response> dispatchSalesTestCall(
+    String id, {
+    required String number,
+    required bool replace,
+    String? callReason,
+    String? name,
+  }) {
+    return dio.post(
+      '/test-call-cards/$id/sales-dispatch',
+      data: {
+        'number': number,
+        'replace': replace,
+        'call_reason': callReason,
+        'name': name,
+      },
+    );
+  }
+
   // ── Dashboard updates / changelog ──────────────────────────────────────────
 
   /// Returns updates that the current user has not yet acknowledged.
