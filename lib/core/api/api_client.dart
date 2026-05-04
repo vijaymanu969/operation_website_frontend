@@ -120,8 +120,12 @@ class ApiClient {
 
   // ── Test call cards ────────────────────────────────────────────────────────
 
-  Future<Response> getTestCallCards() {
-    return dio.get('/test-call-cards');
+  Future<Response> getTestCallCards({String? verticalName}) {
+    final params = <String, dynamic>{};
+    if (verticalName != null && verticalName.isNotEmpty) {
+      params['vertical_name'] = verticalName;
+    }
+    return dio.get('/test-call-cards', queryParameters: params);
   }
 
   Future<Response> createTestCallCard(Map<String, dynamic> data) {
@@ -136,33 +140,20 @@ class ApiClient {
     return dio.delete('/test-call-cards/$id');
   }
 
+  Future<Response> getTestCallCardVerticals() {
+    return dio.get('/test-call-cards/verticals');
+  }
+
   Future<Response> dispatchTestCall(
     String id, {
-    required String number,
+    required List<List<dynamic>> numbers,
     required bool replace,
   }) {
     return dio.post(
       '/test-call-cards/$id/dispatch',
-      data: {'number': number, 'replace': replace},
-    );
-  }
-
-  /// Server-side proxy to the SALES microservice. Admin key lives on the ops
-  /// backend — frontend never sees it.
-  Future<Response> dispatchSalesTestCall(
-    String id, {
-    required String number,
-    required bool replace,
-    String? callReason,
-    String? name,
-  }) {
-    return dio.post(
-      '/test-call-cards/$id/sales-dispatch',
       data: {
-        'number': number,
         'replace': replace,
-        'call_reason': callReason,
-        'name': name,
+        'numbers': numbers,
       },
     );
   }

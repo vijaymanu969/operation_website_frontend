@@ -16,6 +16,9 @@ const _kMuted = Color(0xFF6B7280);
 const _kText = Color(0xFF1A1A1A);
 
 const String _kPhonePrefix = '+9140453074';
+const String _kRealEstateVertical = 'realestate';
+const String _kVisaVertical = 'visa';
+const List<String> _kAllowedVerticals = [_kRealEstateVertical, _kVisaVertical];
 
 // ─── Model ────────────────────────────────────────────────────────────────────
 
@@ -25,6 +28,7 @@ class TestCallCard {
   String agentName;
   String agentNumber;
   String campaignId;
+  String verticalName;
   String? createdAt;
 
   TestCallCard({
@@ -33,16 +37,40 @@ class TestCallCard {
     required this.agentName,
     required this.agentNumber,
     required this.campaignId,
+    required this.verticalName,
     this.createdAt,
   });
 
   factory TestCallCard.fromJson(Map<String, dynamic> j) => TestCallCard(
-        id: (j['id'] ?? '').toString(),
-        cardName: (j['card_name'] ?? '').toString(),
-        agentName: (j['agent_name'] ?? '').toString(),
-        agentNumber: (j['agent_number'] ?? '').toString(),
-        campaignId: (j['campaign_id'] ?? '').toString(),
+        id: (j['id'] ?? j['campaign_id'] ?? '').toString(),
+        cardName: (j['card_name'] ?? j['campaign_name'] ?? j['name'] ?? '')
+            .toString(),
+        agentName:
+            (j['agent_name'] ?? j['agent'] ?? j['name'] ?? '').toString(),
+        agentNumber: (j['agent_number'] ??
+                j['from_number'] ??
+                j['phone_number'] ??
+                j['number'] ??
+                '')
+            .toString(),
+        campaignId: (j['campaign_id'] ?? j['id'] ?? '').toString(),
+        verticalName: _normalizeVerticalName(j['vertical_name']?.toString()),
         createdAt: j['created_at']?.toString(),
+      );
+}
+
+class CampaignVertical {
+  final String name;
+  final int cardCount;
+
+  CampaignVertical({required this.name, required this.cardCount});
+
+  factory CampaignVertical.fromJson(Map<String, dynamic> j) => CampaignVertical(
+        name: (j['name'] ?? '').toString(),
+        cardCount: int.tryParse(
+              (j['card_count'] ?? 0).toString(),
+            ) ??
+            0,
       );
 }
 
@@ -56,7 +84,9 @@ class AgentsScreen extends StatefulWidget {
 }
 
 class _AgentsScreenState extends State<AgentsScreen> {
+  List<CampaignVertical> _verticals = [];
   List<TestCallCard> _cards = [];
+  String? _selectedVerticalName;
   bool _loading = true;
   String? _error;
 
@@ -78,21 +108,93 @@ class _AgentsScreenState extends State<AgentsScreen> {
       _error = null;
     });
     try {
-      final res = await _api.getTestCallCards();
-      final root = res.data is Map ? (res.data['data'] ?? res.data) : res.data;
-      List? raw;
-      if (root is List) {
-        raw = root;
-      } else if (root is Map) {
-        raw = (root['cards'] ?? root['items'] ?? root['rows']) as List?;
-      }
-      final list = (raw ?? [])
-          .map((e) =>
-              TestCallCard.fromJson(Map<String, dynamic>.from(e as Map)))
-          .toList();
+      final verticals = await _fetchVerticals();
+      final selected = _resolveSelectedVertical(verticals);
+      final cards =
+          selected == null ? <TestCallCard>[] : await _fetchCards(selected);
       if (!mounted) return;
       setState(() {
-        _cards = list;
+        _verticals = verticals;
+        _selectedVerticalName = selected;
+        _cards = cards;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _readableError(e, fallback: 'Failed to load cards');
+      });
+    }
+  }
+
+  Future<List<CampaignVertical>> _fetchVerticals() async {
+    final res = await _api.getTestCallCardVerticals();
+    final root = res.data is Map ? (res.data['data'] ?? res.data) : res.data;
+    List? raw;
+    if (root is List) {
+      raw = root;
+    } else if (root is Map) {
+      raw = (root['verticals'] ?? root['items'] ?? root['rows']) as List?;
+    }
+    final counts = {
+      for (final name in _kAllowedVerticals) name: 0,
+    };
+    for (final item in raw ?? []) {
+      final vertical = CampaignVertical.fromJson(
+        Map<String, dynamic>.from(item as Map),
+      );
+      if (_kAllowedVerticals.contains(vertical.name)) {
+        counts[vertical.name] = vertical.cardCount;
+      }
+    }
+    return [
+      for (final name in _kAllowedVerticals)
+        CampaignVertical(name: name, cardCount: counts[name] ?? 0),
+    ];
+  }
+
+  Future<List<TestCallCard>> _fetchCards(String verticalName) async {
+    final res = await _api.getTestCallCards(verticalName: verticalName);
+    final root = res.data is Map ? (res.data['data'] ?? res.data) : res.data;
+    List? raw;
+    if (root is List) {
+      raw = root;
+    } else if (root is Map) {
+      raw = (root['campaigns'] ??
+          root['cards'] ??
+          root['items'] ??
+          root['rows']) as List?;
+    }
+    return (raw ?? []).map((e) {
+      final card = TestCallCard.fromJson(Map<String, dynamic>.from(e as Map));
+      card.verticalName = verticalName;
+      return card;
+    }).toList();
+  }
+
+  String? _resolveSelectedVertical(List<CampaignVertical> verticals) {
+    if (verticals.isEmpty) return _kRealEstateVertical;
+    final current = _selectedVerticalName;
+    if (current != null && _kAllowedVerticals.contains(current)) {
+      return current;
+    }
+    return _kRealEstateVertical;
+  }
+
+  Future<void> _selectVertical(String verticalName) async {
+    if (!_kAllowedVerticals.contains(verticalName)) return;
+    if (_selectedVerticalName == verticalName) return;
+    setState(() {
+      _selectedVerticalName = verticalName;
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final cards = await _fetchCards(verticalName);
+      if (!mounted) return;
+      setState(() {
+        _cards = cards;
         _loading = false;
       });
     } catch (e) {
@@ -151,6 +253,9 @@ class _AgentsScreenState extends State<AgentsScreen> {
 
   Future<void> _showCardDialog({TestCallCard? existing}) async {
     final isEdit = existing != null;
+    var verticalName = isEdit
+        ? _normalizeVerticalName(existing!.verticalName)
+        : _kRealEstateVertical;
     final cardCtl = TextEditingController(text: existing?.cardName ?? '');
     final agentCtl = TextEditingController(text: existing?.agentName ?? '');
 
@@ -160,120 +265,112 @@ class _AgentsScreenState extends State<AgentsScreen> {
             : '';
     final numberCtl = TextEditingController(text: existingSuffix);
     final campaignCtl = TextEditingController(text: existing?.campaignId ?? '');
-    final apiKeyCtl = TextEditingController();
     final formKey = GlobalKey<FormState>();
 
     final saved = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: _kSurface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: Text(isEdit ? 'Edit Card' : 'New Test Call Card',
-            style: const TextStyle(
-                fontWeight: FontWeight.w600, color: _kText, fontSize: 18)),
-        content: SizedBox(
-          width: 460,
-          child: SingleChildScrollView(
-            child: Form(
-              key: formKey,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _Field(
-                    label: 'Card Name',
-                    controller: cardCtl,
-                    hint: 'e.g. Consultancy Agent',
-                    validator: _required,
-                  ),
-                  const SizedBox(height: 12),
-                  _Field(
-                    label: 'Agent Name',
-                    controller: agentCtl,
-                    hint: 'e.g. Sneha',
-                    validator: _required,
-                  ),
-                  const SizedBox(height: 12),
-                  _Field(
-                    label: 'Agent Number',
-                    controller: numberCtl,
-                    hint: 'XX',
-                    keyboardType: TextInputType.number,
-                    prefixText: '$_kPhonePrefix ',
-                    inputFormatters: [
-                      FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(2),
-                    ],
-                    validator: (v) {
-                      final t = (v ?? '').trim();
-                      if (t.isEmpty) return 'Required';
-                      if (!RegExp(r'^\d{2}$').hasMatch(t)) {
-                        return 'Enter exactly 2 digits';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  _Field(
-                    label: 'Campaign ID',
-                    controller: campaignCtl,
-                    hint: 'e.g. 8458948c-4daf-49a8-8379-aa9bb50c5394',
-                    validator: _required,
-                  ),
-                  const SizedBox(height: 12),
-                  _Field(
-                    label: 'API Key',
-                    controller: apiKeyCtl,
-                    hint: isEdit
-                        ? 'Leave blank to keep existing key'
-                        : 'Organization API key',
-                    obscure: true,
-                    validator: (v) {
-                      if (isEdit) return null; // optional on edit
-                      return _required(v);
-                    },
-                  ),
-                ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          backgroundColor: _kSurface,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          title: Text(isEdit ? 'Edit Card' : 'New Test Call Card',
+              style: const TextStyle(
+                  fontWeight: FontWeight.w600, color: _kText, fontSize: 18)),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _Field(
+                      label: 'Card Name',
+                      controller: cardCtl,
+                      hint: 'e.g. Consultancy Agent',
+                      validator: _required,
+                    ),
+                    const SizedBox(height: 12),
+                    _Field(
+                      label: 'Agent Name',
+                      controller: agentCtl,
+                      hint: 'e.g. Sneha',
+                      validator: _required,
+                    ),
+                    const SizedBox(height: 12),
+                    _Field(
+                      label: 'Agent Number',
+                      controller: numberCtl,
+                      hint: 'XX',
+                      keyboardType: TextInputType.number,
+                      prefixText: '$_kPhonePrefix ',
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                        LengthLimitingTextInputFormatter(2),
+                      ],
+                      validator: (v) {
+                        final t = (v ?? '').trim();
+                        if (t.isEmpty) return 'Required';
+                        if (!RegExp(r'^\d{2}$').hasMatch(t)) {
+                          return 'Enter exactly 2 digits';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _Field(
+                      label: 'Campaign ID',
+                      controller: campaignCtl,
+                      hint: 'e.g. 8458948c-4daf-49a8-8379-aa9bb50c5394',
+                      validator: _required,
+                    ),
+                    const SizedBox(height: 12),
+                    _VerticalSelector(
+                      value: verticalName,
+                      onChanged: (value) =>
+                          setLocal(() => verticalName = value),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel', style: TextStyle(color: _kMuted)),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _kPrimary,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel', style: TextStyle(color: _kMuted)),
             ),
-            onPressed: () {
-              if (formKey.currentState?.validate() ?? false) {
-                Navigator.of(ctx).pop(true);
-              }
-            },
-            child: Text(isEdit ? 'Save' : 'Create'),
-          ),
-        ],
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _kPrimary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: () {
+                if (formKey.currentState?.validate() ?? false) {
+                  Navigator.of(ctx).pop(true);
+                }
+              },
+              child: Text(isEdit ? 'Save' : 'Create'),
+            ),
+          ],
+        ),
       ),
     );
 
     if (saved != true) return;
 
     final fullNumber = '$_kPhonePrefix${numberCtl.text.trim()}';
-    final apiKey = apiKeyCtl.text.trim();
 
     final payload = <String, dynamic>{
       'card_name': cardCtl.text.trim(),
       'agent_name': agentCtl.text.trim(),
       'agent_number': fullNumber,
       'campaign_id': campaignCtl.text.trim(),
+      'vertical_name': verticalName,
     };
-    if (apiKey.isNotEmpty || !isEdit) {
-      payload['api_key'] = apiKey;
-    }
 
     try {
       if (isEdit) {
@@ -330,7 +427,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
     );
     if (ok != true) return;
     try {
-      await _api.updateTestCallCard(card.id, {'card_name': ctl.text.trim()});
+      await _api.updateTestCallCard(card.id, {
+        'card_name': ctl.text.trim(),
+        'vertical_name': card.verticalName,
+      });
       await _load();
     } catch (e) {
       _toast(_readableError(e, fallback: 'Failed to rename card'),
@@ -371,8 +471,6 @@ class _AgentsScreenState extends State<AgentsScreen> {
 
   Future<void> _showCallPopup(TestCallCard card) async {
     final phoneCtl = TextEditingController(text: '+91');
-    final nameCtl = TextEditingController();
-    final reasonCtl = TextEditingController();
     bool sending = false;
     bool replaceExisting = false;
     final formKey = GlobalKey<FormState>();
@@ -410,18 +508,6 @@ class _AgentsScreenState extends State<AgentsScreen> {
                         }
                         return null;
                       },
-                    ),
-                    const SizedBox(height: 12),
-                    _Field(
-                      label: 'Name (optional)',
-                      controller: nameCtl,
-                      hint: 'Lead name',
-                    ),
-                    const SizedBox(height: 12),
-                    _Field(
-                      label: 'Call Reason (optional)',
-                      controller: reasonCtl,
-                      hint: 'Why are you calling?',
                     ),
                     const SizedBox(height: 8),
                     Text(
@@ -475,14 +561,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
                   : () async {
                       if (!(formKey.currentState?.validate() ?? false)) return;
                       setLocal(() => sending = true);
-                      final name = nameCtl.text.trim();
-                      final reason = reasonCtl.text.trim();
                       final result = await _dispatchCall(
                         card: card,
                         number: phoneCtl.text.trim(),
                         replace: replaceExisting,
-                        callReason: reason.isEmpty ? null : reason,
-                        name: name.isEmpty ? null : name,
                       );
                       if (ctx.mounted) Navigator.of(ctx).pop();
                       if (!mounted) return;
@@ -512,17 +594,14 @@ class _AgentsScreenState extends State<AgentsScreen> {
     required TestCallCard card,
     required String number,
     required bool replace,
-    required String? callReason,
-    required String? name,
   }) async {
     try {
-      // Server-side proxy: ops backend forwards the SALES response as-is.
-      final res = await _api.dispatchSalesTestCall(
+      final res = await _api.dispatchTestCall(
         card.id,
-        number: number,
+        numbers: [
+          [number, null, card.agentName],
+        ],
         replace: replace,
-        callReason: callReason,
-        name: name,
       );
 
       final data = res.data;
@@ -578,6 +657,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildHeader(),
+              if (_verticals.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                _buildVerticalTabs(),
+              ],
               const SizedBox(height: 16),
               Expanded(
                 child: _loading
@@ -631,9 +714,32 @@ class _AgentsScreenState extends State<AgentsScreen> {
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(8)),
           ),
-          onPressed: () => _showCardDialog(),
+          onPressed:
+              _selectedVerticalName == null ? null : () => _showCardDialog(),
         ),
       ],
+    );
+  }
+
+  Widget _buildVerticalTabs() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final tileWidth =
+            _isMobile ? constraints.maxWidth : (constraints.maxWidth - 12) / 2;
+        return Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            for (final vertical in _verticals)
+              _VerticalOptionTile(
+                width: tileWidth,
+                vertical: vertical,
+                selected: vertical.name == _selectedVerticalName,
+                onTap: () => _selectVertical(vertical.name),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -645,8 +751,11 @@ class _AgentsScreenState extends State<AgentsScreen> {
           Icon(Icons.phone_in_talk_outlined,
               size: 56, color: _kMuted.withValues(alpha: 0.5)),
           const SizedBox(height: 12),
-          const Text('No cards yet',
-              style: TextStyle(color: _kMuted, fontSize: 14)),
+          Text(
+              _selectedVerticalName == null
+                  ? 'No verticals yet'
+                  : 'No cards in ${_verticalLabel(_selectedVerticalName!)}',
+              style: const TextStyle(color: _kMuted, fontSize: 14)),
           const SizedBox(height: 4),
           const Text('Create your first test call card to get started.',
               style: TextStyle(color: _kMuted, fontSize: 12)),
@@ -883,6 +992,76 @@ class _CardTile extends StatelessWidget {
   }
 }
 
+class _VerticalOptionTile extends StatelessWidget {
+  final double width;
+  final CampaignVertical vertical;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _VerticalOptionTile({
+    required this.width,
+    required this.vertical,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: width,
+      child: Material(
+        color: selected ? _kPrimary.withValues(alpha: 0.08) : _kSurface,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: selected ? _kPrimary : _kBorder),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  selected
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                  size: 18,
+                  color: selected ? _kPrimary : _kMuted,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _verticalLabel(vertical.name),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: selected ? _kPrimary : _kText,
+                      fontSize: 14,
+                      fontWeight:
+                          selected ? FontWeight.w700 : FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  '${vertical.cardCount} cards',
+                  style: TextStyle(
+                    color: selected ? _kPrimary : _kMuted,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _NumIconBtn extends StatelessWidget {
   final IconData icon;
   final String tooltip;
@@ -920,6 +1099,76 @@ class _NumIconBtn extends StatelessWidget {
 
 String? _required(String? v) =>
     (v == null || v.trim().isEmpty) ? 'Required' : null;
+
+String _normalizeVerticalName(String? name) {
+  return name == _kVisaVertical ? _kVisaVertical : _kRealEstateVertical;
+}
+
+String _verticalLabel(String name) {
+  final normalized = _normalizeVerticalName(name);
+  if (normalized == _kVisaVertical) return 'Visa';
+  return 'Real Estate';
+}
+
+class _VerticalSelector extends StatelessWidget {
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  const _VerticalSelector({
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Vertical',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            color: _kMuted,
+          ),
+        ),
+        const SizedBox(height: 6),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(
+              value: _kRealEstateVertical,
+              label: Text('Real Estate'),
+            ),
+            ButtonSegment(
+              value: _kVisaVertical,
+              label: Text('Visa'),
+            ),
+          ],
+          selected: {value},
+          onSelectionChanged: (selected) => onChanged(selected.first),
+          style: ButtonStyle(
+            backgroundColor: WidgetStateProperty.resolveWith(
+              (states) => states.contains(WidgetState.selected)
+                  ? _kPrimary.withValues(alpha: 0.10)
+                  : _kSurface,
+            ),
+            foregroundColor: WidgetStateProperty.resolveWith(
+              (states) =>
+                  states.contains(WidgetState.selected) ? _kPrimary : _kText,
+            ),
+            side: WidgetStateProperty.resolveWith(
+              (states) => BorderSide(
+                color: states.contains(WidgetState.selected)
+                    ? _kPrimary
+                    : _kBorder,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 class _Field extends StatelessWidget {
   final String label;
