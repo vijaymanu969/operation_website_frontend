@@ -144,6 +144,13 @@ class _IdeaRequest {
   );
 }
 
+// ── Internal: rendered list item types ────────────────────────────────────────
+
+class _DaySeparator {
+  final String label;
+  const _DaySeparator({required this.label});
+}
+
 // ── Task review models ────────────────────────────────────────────────────────
 
 enum _TaskReviewStatus { pending, completed, rejected, none }
@@ -351,7 +358,10 @@ class _ChatScreenState extends State<ChatScreen> {
   String _search = '';
   bool _loadingConversations = true;
   bool _loadingMessages = false;
-
+  // Pagination state
+  static const int _kMessagesPageSize = 30;
+  bool _hasMoreMessages = false;
+  bool _loadingMoreMessages = false;
   // API data
   List<Map<String, dynamic>> _conversations = [];
   List<_Message> _messages = [];
@@ -571,6 +581,13 @@ class _ChatScreenState extends State<ChatScreen> {
     if (atBottom != !_showScrollDown) {
       setState(() => _showScrollDown = !atBottom);
     }
+    // Trigger lazy-load when within 200px of the top.
+    if (_scrollCtrl.position.pixels <= 200 &&
+        _hasMoreMessages &&
+        !_loadingMoreMessages &&
+        !_loadingMessages) {
+      _loadMoreMessages();
+    }
   }
 
   @override
@@ -676,11 +693,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadMessages(String conversationId) async {
-    setState(() => _loadingMessages = true);
+    setState(() {
+      _loadingMessages = true;
+      _hasMoreMessages = false;
+    });
     try {
-      final res = await _api.getMessages(conversationId);
+      final res = await _api.getMessages(conversationId, limit: _kMessagesPageSize);
       final data = res.data as Map<String, dynamic>;
       final msgs = (data['messages'] as List).cast<Map<String, dynamic>>();
+      _hasMoreMessages = data['has_more'] == true;
 
       // Populate _lastReadBy from server snapshot so ticks are correct on load.
       final rawLastRead = data['last_read_by'] as Map<String, dynamic>?;
@@ -692,111 +713,158 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       });
 
-      _messages = msgs.map((m) {
-        final type         = m['type'] as String? ?? 'text';
-        final msgId        = m['id'] as String?;
-        final createdAtIso = m['created_at'] as String?;
-        final senderId     = m['sender_id'] as String?;
-        final isSent       = senderId == _myUserId;
-        final time         = _formatTime(createdAtIso ?? '');
-        final senderName   = m['sender_name'] as String?;
-
-        if (type == 'idea_request') {
-          final ir = m['idea_request'] as Map<String, dynamic>?;
-          if (ir != null) {
-            return _Message(
-              id: msgId, createdAtIso: createdAtIso,
-              sent: isSent, time: time, senderName: senderName,
-              ideaReq: _IdeaRequest.fromJson(ir),
-            );
-          }
-        }
-
-        if (type == 'pause_request') {
-          final pr = m['pause_request'] as Map<String, dynamic>?;
-          if (pr != null) {
-            return _Message(
-              id: msgId, createdAtIso: createdAtIso,
-              sent: isSent, time: time, senderName: senderName,
-              pauseReq: _PauseRequest.fromJson(pr),
-            );
-          }
-        }
-
-        if (type == 'task_created' || type == 'task_review') {
-          final isNotif = type == 'task_created';
-          final task = m['task'] as Map<String, dynamic>?;
-          String assigneeName = '';
-          final assignees = task?['assignees'] as List?;
-          if (assignees != null && assignees.isNotEmpty) {
-            assigneeName = assignees.map((a) => (a as Map)['name']?.toString() ?? '').join(', ');
-          } else {
-            assigneeName = task?['person_name']?.toString() ?? '';
-          }
-          final priorityRaw = (task?['priority'] as String? ?? 'medium').toLowerCase();
-          final priorityLabel = priorityRaw.isNotEmpty
-              ? priorityRaw[0].toUpperCase() + priorityRaw.substring(1)
-              : 'Medium';
-          String reviewerName = '';
-          String reviewerId   = '';
-          final reviewers = task?['reviewers'] as List?;
-          if (reviewers != null && reviewers.isNotEmpty) {
-            reviewerName = reviewers.map((r) => (r as Map)['name']?.toString() ?? '').join(', ');
-            reviewerId   = (reviewers.first as Map)['id']?.toString() ?? '';
-          }
-          String? endDateStr;
-          final rawEnd = task?['end_date'] as String?;
-          if (rawEnd != null && rawEnd.isNotEmpty) {
-            final dt = DateTime.tryParse(rawEnd);
-            if (dt != null) endDateStr = _fmtDate(dt);
-          }
-          String dateStr = '';
-          final rawDate = task?['date'] as String?;
-          if (rawDate != null && rawDate.isNotEmpty) {
-            final dt = DateTime.tryParse(rawDate);
-            if (dt != null) dateStr = _fmtDate(dt);
-          }
-          return _Message(
-            id: msgId, createdAtIso: createdAtIso,
-            sent: isSent, time: time, senderName: senderName,
-            task: task != null ? _ChatTask(
-              messageId:           m['id'] as String? ?? '',
-              taskId:              task['id'] as String? ?? '',
-              title:               task['title'] as String? ?? '',
-              description:         task['description'] as String? ?? '',
-              assignee:            assigneeName,
-              reviewerName:        reviewerName,
-              reviewerId:          reviewerId,
-              priority:            priorityLabel,
-              type:                task['type_name'] as String? ?? task['type'] as String? ?? '',
-              status:              task['status'] as String? ?? '',
-              date:                dateStr,
-              endDate:             endDateStr,
-              isPaused:            task['is_paused'] as bool? ?? false,
-              isNotification:      isNotif,
-              reviewStatus:        isNotif
-                  ? _TaskReviewStatus.none
-                  : _parseReviewStatus(m['review_status'] as String?),
-              pendingPauseRequest: task['pending_pause_request'] as Map<String, dynamic>?,
-            ) : null,
-          );
-        }
-
-        return _Message(
-          id: msgId, createdAtIso: createdAtIso,
-          text:           m['content']         as String?,
-          sent: isSent, time: time, senderName: senderName,
-          attachmentUrl:  m['attachment_url']  as String?,
-          attachmentType: m['attachment_type'] as String?,
-          attachmentName: m['attachment_name'] as String?,
-          attachmentSize: _parseSize(m['attachment_size']),
-        );
-      }).toList().reversed.toList(); // API returns newest first, we want oldest first
+      _messages = msgs
+          .map(_parseHistoryMessage)
+          .toList()
+          .reversed
+          .toList(); // API returns newest first, we want oldest first
     } catch (_) {
       _messages = [];
     }
     if (mounted) setState(() => _loadingMessages = false);
     _scrollToBottom();
+  }
+
+  /// Loads the next page of older messages and prepends them, preserving the
+  /// user's scroll position so they don't jump to the top.
+  Future<void> _loadMoreMessages() async {
+    if (_loadingMoreMessages || !_hasMoreMessages) return;
+    if (_messages.isEmpty) return;
+    final convId = _selectedId;
+    if (convId.isEmpty) return;
+    final cursor = _messages.first.createdAtIso;
+    if (cursor == null || cursor.isEmpty) return;
+
+    setState(() => _loadingMoreMessages = true);
+
+    // Capture scroll position so we can restore it after the prepend.
+    final beforeMax = _scrollCtrl.hasClients ? _scrollCtrl.position.maxScrollExtent : 0.0;
+    final beforePixels = _scrollCtrl.hasClients ? _scrollCtrl.position.pixels : 0.0;
+
+    try {
+      final res = await _api.getMessages(convId, limit: _kMessagesPageSize, cursor: cursor);
+      if (convId != _selectedId || !mounted) return; // user switched chats mid-flight
+      final data = res.data as Map<String, dynamic>;
+      final msgs = (data['messages'] as List).cast<Map<String, dynamic>>();
+      final older = msgs.map(_parseHistoryMessage).toList().reversed.toList();
+      setState(() {
+        _messages.insertAll(0, older);
+        _hasMoreMessages = data['has_more'] == true;
+      });
+
+      // Restore scroll position: after the prepend, the new max is larger;
+      // shift pixels by the delta so the user sees the same content they were
+      // looking at before, instead of jumping to the top.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollCtrl.hasClients) return;
+        final afterMax = _scrollCtrl.position.maxScrollExtent;
+        final delta = afterMax - beforeMax;
+        if (delta > 0) _scrollCtrl.jumpTo(beforePixels + delta);
+      });
+    } catch (_) {/* keep existing messages on error */} finally {
+      if (mounted) setState(() => _loadingMoreMessages = false);
+    }
+  }
+
+  _Message _parseHistoryMessage(Map<String, dynamic> m) {
+    final type         = m['type'] as String? ?? 'text';
+    final msgId        = m['id'] as String?;
+    final createdAtIso = m['created_at'] as String?;
+    final senderId     = m['sender_id'] as String?;
+    final isSent       = senderId == _myUserId;
+    final time         = _formatTime(createdAtIso ?? '');
+    final senderName   = m['sender_name'] as String?;
+
+    if (type == 'idea_request') {
+      final ir = m['idea_request'] as Map<String, dynamic>?;
+      if (ir != null) {
+        return _Message(
+          id: msgId, createdAtIso: createdAtIso,
+          sent: isSent, time: time, senderName: senderName,
+          ideaReq: _IdeaRequest.fromJson(ir),
+        );
+      }
+    }
+
+    if (type == 'pause_request') {
+      final pr = m['pause_request'] as Map<String, dynamic>?;
+      if (pr != null) {
+        return _Message(
+          id: msgId, createdAtIso: createdAtIso,
+          sent: isSent, time: time, senderName: senderName,
+          pauseReq: _PauseRequest.fromJson(pr),
+        );
+      }
+    }
+
+    if (type == 'task_created' || type == 'task_review') {
+      final isNotif = type == 'task_created';
+      final task = m['task'] as Map<String, dynamic>?;
+      String assigneeName = '';
+      final assignees = task?['assignees'] as List?;
+      if (assignees != null && assignees.isNotEmpty) {
+        assigneeName = assignees.map((a) => (a as Map)['name']?.toString() ?? '').join(', ');
+      } else {
+        assigneeName = task?['person_name']?.toString() ?? '';
+      }
+      final priorityRaw = (task?['priority'] as String? ?? 'medium').toLowerCase();
+      final priorityLabel = priorityRaw.isNotEmpty
+          ? priorityRaw[0].toUpperCase() + priorityRaw.substring(1)
+          : 'Medium';
+      String reviewerName = '';
+      String reviewerId   = '';
+      final reviewers = task?['reviewers'] as List?;
+      if (reviewers != null && reviewers.isNotEmpty) {
+        reviewerName = reviewers.map((r) => (r as Map)['name']?.toString() ?? '').join(', ');
+        reviewerId   = (reviewers.first as Map)['id']?.toString() ?? '';
+      }
+      String? endDateStr;
+      final rawEnd = task?['end_date'] as String?;
+      if (rawEnd != null && rawEnd.isNotEmpty) {
+        final dt = DateTime.tryParse(rawEnd);
+        if (dt != null) endDateStr = _fmtDate(dt);
+      }
+      String dateStr = '';
+      final rawDate = task?['date'] as String?;
+      if (rawDate != null && rawDate.isNotEmpty) {
+        final dt = DateTime.tryParse(rawDate);
+        if (dt != null) dateStr = _fmtDate(dt);
+      }
+      return _Message(
+        id: msgId, createdAtIso: createdAtIso,
+        sent: isSent, time: time, senderName: senderName,
+        task: task != null ? _ChatTask(
+          messageId:           m['id'] as String? ?? '',
+          taskId:              task['id'] as String? ?? '',
+          title:               task['title'] as String? ?? '',
+          description:         task['description'] as String? ?? '',
+          assignee:            assigneeName,
+          reviewerName:        reviewerName,
+          reviewerId:          reviewerId,
+          priority:            priorityLabel,
+          type:                task['type_name'] as String? ?? task['type'] as String? ?? '',
+          status:              task['status'] as String? ?? '',
+          date:                dateStr,
+          endDate:             endDateStr,
+          isPaused:            task['is_paused'] as bool? ?? false,
+          isNotification:      isNotif,
+          reviewStatus:        isNotif
+              ? _TaskReviewStatus.none
+              : _parseReviewStatus(m['review_status'] as String?),
+          pendingPauseRequest: task['pending_pause_request'] as Map<String, dynamic>?,
+        ) : null,
+      );
+    }
+
+    return _Message(
+      id: msgId, createdAtIso: createdAtIso,
+      text:           m['content']         as String?,
+      sent: isSent, time: time, senderName: senderName,
+      attachmentUrl:  m['attachment_url']  as String?,
+      attachmentType: m['attachment_type'] as String?,
+      attachmentName: m['attachment_name'] as String?,
+      attachmentSize: _parseSize(m['attachment_size']),
+    );
   }
 
   static String _fmtDate(DateTime d) {
@@ -815,11 +883,35 @@ class _ChatScreenState extends State<ChatScreen> {
     final dt = DateTime.tryParse(isoString);
     if (dt == null) return '';
     final local = dt.toLocal();
+    final clock = _clockTime(local);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final msgDay = DateTime(local.year, local.month, local.day);
+    final diffDays = today.difference(msgDay).inDays;
+    if (diffDays == 0) return clock;
+    if (diffDays == 1) return 'Yesterday, $clock';
+    if (local.year == now.year) return '${_fmtDate(local)}, $clock';
+    return '${_fmtDate(local)}, ${local.year}, $clock';
+  }
+
+  static String _clockTime(DateTime local) {
     final h = local.hour;
     final m = local.minute.toString().padLeft(2, '0');
     final ampm = h >= 12 ? 'PM' : 'AM';
     final h12 = h == 0 ? 12 : (h > 12 ? h - 12 : h);
     return '$h12:$m $ampm';
+  }
+
+  /// "Today" / "Yesterday" / "May 3" / "May 3, 2025"
+  static String _dayLabel(DateTime local) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final msgDay = DateTime(local.year, local.month, local.day);
+    final diffDays = today.difference(msgDay).inDays;
+    if (diffDays == 0) return 'Today';
+    if (diffDays == 1) return 'Yesterday';
+    if (local.year == now.year) return _fmtDate(local);
+    return '${_fmtDate(local)}, ${local.year}';
   }
 
   void _scrollToBottom() {
@@ -1343,16 +1435,58 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // Scrollable message list
+  // Scrollable message list — date separators are computed and interleaved
+  // here from each message's `createdAtIso`, instead of stored as records.
   Widget _buildMessages(_Contact contact) {
     final messages = _messages;
+
+    // Build a flat render list: each item is either a `_Message` or a
+    // `_DaySeparator` (computed on the fly when the day changes).
+    final items = <Object>[];
+    String? lastDayKey;
+    for (final msg in messages) {
+      if (msg.dateLabel != null) {
+        // Mock data still uses a literal label — render as-is, no key.
+        items.add(_DaySeparator(label: msg.dateLabel!));
+        continue;
+      }
+      final iso = msg.createdAtIso;
+      DateTime? dt;
+      if (iso != null && iso.isNotEmpty) dt = DateTime.tryParse(iso)?.toLocal();
+      if (dt != null) {
+        final dayKey =
+            '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+        if (dayKey != lastDayKey) {
+          items.add(_DaySeparator(label: _dayLabel(dt)));
+          lastDayKey = dayKey;
+        }
+      }
+      items.add(msg);
+    }
+
     return ListView.builder(
       controller: _scrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      itemCount: messages.length,
+      // Top loading spinner is item 0 when more pages exist.
+      itemCount: items.length + (_loadingMoreMessages ? 1 : 0),
       itemBuilder: (_, i) {
-        final msg = messages[i];
-        if (msg.dateLabel != null)     return _buildDateSeparator(msg.dateLabel!);
+        if (_loadingMoreMessages && i == 0) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Center(
+              child: SizedBox(
+                width: 18, height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          );
+        }
+        final idx = _loadingMoreMessages ? i - 1 : i;
+        final item = items[idx];
+        if (item is _DaySeparator) {
+          return _buildDateSeparator(item.label);
+        }
+        final msg = item as _Message;
         if (msg.task != null)          return _buildTaskReviewCard(msg, contact);
         if (msg.pauseReq != null)      return _buildPauseRequestCard(msg, contact);
         if (msg.ideaReq != null)       return _buildIdeaRequestCard(msg, contact);
@@ -1360,11 +1494,11 @@ class _ChatScreenState extends State<ChatScreen> {
         if (msg.attachmentUrl != null || msg.attachmentName != null) {
           return _buildAttachmentBubble(msg, contact);
         }
-        // Plain text — but skip rendering if there's nothing to show
         if (msg.text == null || msg.text!.isEmpty) return const SizedBox.shrink();
         return _buildTextBubble(msg, contact);
       },
     );
+
   }
 
   // "Yesterday" / "Today" separator line

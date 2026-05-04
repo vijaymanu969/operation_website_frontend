@@ -216,6 +216,17 @@ class ApiClient {
     return dio.get('/tasks', queryParameters: filters);
   }
 
+  Future<Response> getTaskHistory({
+    int limit = 20,
+    String? before,
+    String? assignee,
+  }) {
+    final params = <String, dynamic>{'limit': limit};
+    if (before != null && before.isNotEmpty) params['before'] = before;
+    if (assignee != null && assignee.isNotEmpty) params['assignee'] = assignee;
+    return dio.get('/tasks/history', queryParameters: params);
+  }
+
   Future<Response> getTask(String id) {
     return dio.get('/tasks/$id');
   }

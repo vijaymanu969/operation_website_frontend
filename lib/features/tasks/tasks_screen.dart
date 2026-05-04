@@ -694,6 +694,7 @@ class _TasksScreenState extends State<TasksScreen> {
           onAddTask:       _showAddTaskDialog,
           onStagnant:      _isAdminUser(context) ? _showStagnantPanel : null,
           onRequests:      _isAdminUser(context) ? _showRequestsPanel : null,
+          onHistory:       _showTaskHistoryPanel,
           onSelectToggle:  _toggleSelectMode,
           selectMode:      _selectMode,
         ),
@@ -1154,6 +1155,43 @@ class _TasksScreenState extends State<TasksScreen> {
               boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 40, offset: Offset(0, 12))],
             ),
             child: _RequestsPanel(
+              api:     _api,
+              onClose: () => Navigator.of(ctx).pop(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showTaskHistoryPanel() {
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: Colors.black45,
+      transitionDuration: const Duration(milliseconds: 200),
+      transitionBuilder: (_, anim, _, child) => FadeTransition(
+        opacity: anim,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.96, end: 1.0)
+              .animate(CurvedAnimation(parent: anim, curve: Curves.easeOutCubic)),
+          child: child,
+        ),
+      ),
+      pageBuilder: (ctx, _, _) => Center(
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            width:       760,
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.84),
+            margin:      const EdgeInsets.all(32),
+            decoration:  BoxDecoration(
+              color:        Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 40, offset: Offset(0, 12))],
+            ),
+            child: _TaskHistoryPanel(
               api:     _api,
               onClose: () => Navigator.of(ctx).pop(),
             ),
@@ -1731,10 +1769,12 @@ class _TopBar extends StatelessWidget {
   final VoidCallback  onAddTask;
   final VoidCallback? onStagnant;
   final VoidCallback? onRequests;
+  final VoidCallback  onHistory;
   final VoidCallback  onSelectToggle;
   final bool          selectMode;
   const _TopBar({
     required this.onAddTask,
+    required this.onHistory,
     required this.onSelectToggle,
     required this.selectMode,
     this.onStagnant,
@@ -1777,6 +1817,22 @@ class _TopBar extends StatelessWidget {
                     ),
                     const SizedBox(width: 10),
                   ],
+                  Tooltip(
+                    message: 'Task history',
+                    child: OutlinedButton(
+                      onPressed: onHistory,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: _kPrimary,
+                        side: const BorderSide(color: _kBorder),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        minimumSize:   Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: const Icon(Icons.history_rounded, size: 16),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
                   if (onStagnant != null) ...[
                     OutlinedButton.icon(
                       onPressed: onStagnant,
@@ -3984,6 +4040,305 @@ String _fmtDateLong(DateTime d) {
 }
 
 // ─── Pending requests panel (pause + idea) ────────────────────────────────────
+
+class _TaskHistoryPanel extends StatefulWidget {
+  final ApiClient api;
+  final VoidCallback onClose;
+
+  const _TaskHistoryPanel({required this.api, required this.onClose});
+
+  @override
+  State<_TaskHistoryPanel> createState() => _TaskHistoryPanelState();
+}
+
+class _TaskHistoryPanelState extends State<_TaskHistoryPanel> {
+  final ScrollController _scrollCtrl = ScrollController();
+  bool _loading = true;
+  bool _loadingMore = false;
+  String? _error;
+  String? _nextCursor;
+  final List<Map<String, dynamic>> _days = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollCtrl.addListener(_onScroll);
+    _loadInitial();
+  }
+
+  @override
+  void dispose() {
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollCtrl.hasClients || _nextCursor == null || _loadingMore) return;
+    final remaining =
+        _scrollCtrl.position.maxScrollExtent - _scrollCtrl.position.pixels;
+    if (remaining < 240) {
+      _loadMore();
+    }
+  }
+
+  Future<void> _loadInitial() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+      _days.clear();
+      _nextCursor = null;
+    });
+    await _loadPage();
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _loadMore() async {
+    if (_nextCursor == null || _loadingMore) return;
+    setState(() => _loadingMore = true);
+    await _loadPage(before: _nextCursor);
+    if (mounted) setState(() => _loadingMore = false);
+  }
+
+  Future<void> _loadPage({String? before}) async {
+    try {
+      final res = await widget.api.getTaskHistory(limit: 20, before: before);
+      final root = res.data is Map ? (res.data['data'] ?? res.data) : res.data;
+      if (root is! Map) throw Exception('Unexpected response');
+      final rawDays = (root['days'] as List?) ?? [];
+      for (final day in rawDays) {
+        _mergeDay(Map<String, dynamic>.from(day as Map));
+      }
+      _nextCursor = root['next_cursor']?.toString();
+      _error = null;
+    } catch (_) {
+      _error = 'Failed to load task history';
+    }
+  }
+
+  void _mergeDay(Map<String, dynamic> incoming) {
+    final date = incoming['date']?.toString() ?? '';
+    final index = _days.indexWhere((d) => d['date']?.toString() == date);
+    if (index == -1) {
+      _days.add(incoming);
+      return;
+    }
+    final currentTasks = ((_days[index]['tasks'] as List?) ?? []);
+    final incomingTasks = ((incoming['tasks'] as List?) ?? []);
+    _days[index]['tasks'] = [...currentTasks, ...incomingTasks];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(18, 14, 10, 8),
+          child: Row(
+            children: [
+              const Icon(Icons.history_rounded, size: 20, color: _kPrimary),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text('Task History',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: _kPrimary)),
+              ),
+              IconButton(
+                tooltip: 'Refresh',
+                onPressed: _loadInitial,
+                icon: const Icon(Icons.refresh, size: 18, color: _kMuted),
+              ),
+              IconButton(
+                tooltip: 'Close',
+                onPressed: widget.onClose,
+                icon: const Icon(Icons.close, size: 20, color: _kMuted),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Flexible(
+          child: _loading
+              ? const SizedBox(height: 260, child: Center(child: CircularProgressIndicator()))
+              : _error != null
+                  ? SizedBox(
+                      height: 220,
+                      child: Center(child: Text(_error!, style: const TextStyle(color: _kMuted, fontSize: 13))),
+                    )
+                  : _days.isEmpty
+                      ? const SizedBox(
+                          height: 220,
+                          child: Center(child: Text('No completed tasks yet', style: TextStyle(color: _kMuted, fontSize: 13))),
+                        )
+                      : ListView.builder(
+                          controller: _scrollCtrl,
+                          padding: const EdgeInsets.all(16),
+                          shrinkWrap: true,
+                          itemCount: _days.length + (_nextCursor != null ? 1 : 0),
+                          itemBuilder: (ctx, i) {
+                            if (i == _days.length) {
+                              return Center(
+                                child: OutlinedButton.icon(
+                                  onPressed: _loadingMore ? null : _loadMore,
+                                  icon: _loadingMore
+                                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                                      : const Icon(Icons.expand_more_rounded, size: 16),
+                                  label: Text(_loadingMore ? 'Loading' : 'Load more'),
+                                ),
+                              );
+                            }
+                            return _HistoryDaySection(day: _days[i]);
+                          },
+                        ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HistoryDaySection extends StatelessWidget {
+  final Map<String, dynamic> day;
+
+  const _HistoryDaySection({required this.day});
+
+  @override
+  Widget build(BuildContext context) {
+    final date = day['date']?.toString() ?? '';
+    final tasks = ((day['tasks'] as List?) ?? [])
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(_historyDateLabel(date),
+              style: const TextStyle(color: _kPrimary, fontWeight: FontWeight.w700, fontSize: 13)),
+          const SizedBox(height: 8),
+          for (final task in tasks) ...[
+            _HistoryTaskTile(task: task),
+            const SizedBox(height: 8),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _HistoryTaskTile extends StatelessWidget {
+  final Map<String, dynamic> task;
+
+  const _HistoryTaskTile({required this.task});
+
+  @override
+  Widget build(BuildContext context) {
+    final completedAt = _parseHistoryCompletedAt(task['completed_at']);
+    final assignees = _historyNames(task['assignees']);
+    final reviewers = _historyNames(task['reviewers']);
+    final types = _historyNames(task['types']);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _kBg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _kBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
+                  task['title']?.toString() ?? '(untitled)',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _kPrimary, fontWeight: FontWeight.w700, fontSize: 14),
+                ),
+              ),
+              if (completedAt != null)
+                Text(_historyTimeLabel(completedAt),
+                    style: const TextStyle(color: _kMuted, fontSize: 12)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (assignees.isNotEmpty) _HistoryMetaChip(icon: Icons.person, text: assignees),
+              if (reviewers.isNotEmpty) _HistoryMetaChip(icon: Icons.rate_review, text: reviewers),
+              if (types.isNotEmpty) _HistoryMetaChip(icon: Icons.label, text: types),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HistoryMetaChip extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _HistoryMetaChip({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: _kBorder),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: _kMuted),
+          const SizedBox(width: 4),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 260),
+            child: Text(text,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: _kMuted, fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _historyNames(dynamic value) {
+  if (value is! List) return '';
+  return value
+      .map((item) {
+        if (item is Map) return (item['name'] ?? item['title'] ?? '').toString();
+        return item.toString();
+      })
+      .where((name) => name.trim().isNotEmpty)
+      .join(', ');
+}
+
+String _historyDateLabel(String raw) {
+  final parsed = DateTime.tryParse(raw);
+  if (parsed == null) return raw;
+  return _fmtDateLong(parsed.toLocal());
+}
+
+DateTime? _parseHistoryCompletedAt(dynamic value) {
+  final raw = value?.toString();
+  if (raw == null || raw.isEmpty) return null;
+  return DateTime.tryParse(raw)?.toLocal();
+}
+
+String _historyTimeLabel(DateTime date) {
+  final hour = date.hour % 12 == 0 ? 12 : date.hour % 12;
+  final minute = date.minute.toString().padLeft(2, '0');
+  final suffix = date.hour >= 12 ? 'PM' : 'AM';
+  return '$hour:$minute $suffix';
+}
 
 class _RequestsPanel extends StatefulWidget {
   final ApiClient    api;
