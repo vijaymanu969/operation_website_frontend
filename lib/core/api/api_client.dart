@@ -144,6 +144,25 @@ class ApiClient {
     return dio.get('/test-call-cards/verticals');
   }
 
+  Future<Response> getTestCallVerticals() {
+    return dio.get('/test-call-verticals');
+  }
+
+  Future<Response> createTestCallVertical(Map<String, dynamic> data) {
+    return dio.post('/test-call-verticals', data: data);
+  }
+
+  Future<Response> updateTestCallVertical(
+    String slug,
+    Map<String, dynamic> data,
+  ) {
+    return dio.put('/test-call-verticals/$slug', data: data);
+  }
+
+  Future<Response> deactivateTestCallVertical(String slug) {
+    return dio.delete('/test-call-verticals/$slug');
+  }
+
   Future<Response> dispatchTestCall(
     String id, {
     required List<List<dynamic>> numbers,

@@ -5,6 +5,8 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api/api_client.dart';
+import '../../core/auth/auth_bloc.dart';
+import '../../core/config/app_config.dart';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 
@@ -18,7 +20,6 @@ const _kText = Color(0xFF1A1A1A);
 const String _kPhonePrefix = '+9140453074';
 const String _kRealEstateVertical = 'realestate';
 const String _kVisaVertical = 'visa';
-const List<String> _kAllowedVerticals = [_kRealEstateVertical, _kVisaVertical];
 
 // ─── Model ────────────────────────────────────────────────────────────────────
 
@@ -60,17 +61,49 @@ class TestCallCard {
 }
 
 class CampaignVertical {
+  final String? id;
   final String name;
+  final String slug;
+  final String baseUrl;
+  final String adminKeyLast4;
+  final bool isActive;
+  final String source;
   final int cardCount;
 
-  CampaignVertical({required this.name, required this.cardCount});
+  CampaignVertical({
+    this.id,
+    required this.name,
+    required this.slug,
+    required this.baseUrl,
+    required this.adminKeyLast4,
+    required this.isActive,
+    required this.source,
+    required this.cardCount,
+  });
 
   factory CampaignVertical.fromJson(Map<String, dynamic> j) => CampaignVertical(
+        id: j['id']?.toString(),
         name: (j['name'] ?? '').toString(),
+        slug: _normalizeVerticalName(j['slug']?.toString()),
+        baseUrl: (j['base_url'] ?? '').toString(),
+        adminKeyLast4: (j['admin_key_last4'] ?? '').toString(),
+        isActive: j['is_active'] != false,
+        source: (j['source'] ?? 'database').toString(),
         cardCount: int.tryParse(
               (j['card_count'] ?? 0).toString(),
             ) ??
             0,
+      );
+
+  CampaignVertical copyWith({int? cardCount}) => CampaignVertical(
+        id: id,
+        name: name,
+        slug: slug,
+        baseUrl: baseUrl,
+        adminKeyLast4: adminKeyLast4,
+        isActive: isActive,
+        source: source,
+        cardCount: cardCount ?? this.cardCount,
       );
 }
 
@@ -93,6 +126,12 @@ class _AgentsScreenState extends State<AgentsScreen> {
   ApiClient get _api => context.read<ApiClient>();
 
   bool get _isMobile => MediaQuery.of(context).size.width < 700;
+
+  bool get _canEdit {
+    final state = context.read<AuthBloc>().state;
+    if (state is! AuthAuthenticated) return false;
+    return state.user.hasEditAccess(AppConfig.pageAgents);
+  }
 
   @override
   void initState() {
@@ -129,29 +168,58 @@ class _AgentsScreenState extends State<AgentsScreen> {
   }
 
   Future<List<CampaignVertical>> _fetchVerticals() async {
-    final res = await _api.getTestCallCardVerticals();
-    final root = res.data is Map ? (res.data['data'] ?? res.data) : res.data;
-    List? raw;
-    if (root is List) {
-      raw = root;
-    } else if (root is Map) {
-      raw = (root['verticals'] ?? root['items'] ?? root['rows']) as List?;
+    final verticalsRes = await _api.getTestCallVerticals();
+    final countsRes = await _api.getTestCallCardVerticals();
+    final verticalsRoot = verticalsRes.data is Map
+        ? (verticalsRes.data['data'] ?? verticalsRes.data)
+        : verticalsRes.data;
+    final countsRoot = countsRes.data is Map
+        ? (countsRes.data['data'] ?? countsRes.data)
+        : countsRes.data;
+
+    List? verticalsRaw;
+    if (verticalsRoot is List) {
+      verticalsRaw = verticalsRoot;
+    } else if (verticalsRoot is Map) {
+      verticalsRaw =
+          (verticalsRoot['verticals'] ?? verticalsRoot['items'] ?? verticalsRoot['rows'])
+              as List?;
     }
-    final counts = {
-      for (final name in _kAllowedVerticals) name: 0,
-    };
-    for (final item in raw ?? []) {
-      final vertical = CampaignVertical.fromJson(
-        Map<String, dynamic>.from(item as Map),
+
+    List? countsRaw;
+    if (countsRoot is List) {
+      countsRaw = countsRoot;
+    } else if (countsRoot is Map) {
+      countsRaw =
+          (countsRoot['verticals'] ?? countsRoot['items'] ?? countsRoot['rows'])
+              as List?;
+    }
+
+    final counts = <String, int>{};
+    for (final item in countsRaw ?? []) {
+      final map = Map<String, dynamic>.from(item as Map);
+      final slug = _normalizeVerticalName(
+        (map['slug'] ?? map['name'] ?? '').toString(),
       );
-      if (_kAllowedVerticals.contains(vertical.name)) {
-        counts[vertical.name] = vertical.cardCount;
-      }
+      counts[slug] = int.tryParse(
+            (map['card_count'] ?? map['campaign_count'] ?? 0).toString(),
+          ) ??
+          0;
     }
-    return [
-      for (final name in _kAllowedVerticals)
-        CampaignVertical(name: name, cardCount: counts[name] ?? 0),
-    ];
+
+    final verticals = (verticalsRaw ?? [])
+        .map((e) => CampaignVertical.fromJson(Map<String, dynamic>.from(e as Map)))
+        .where((v) => v.isActive)
+        .map((v) => v.copyWith(cardCount: counts[v.slug] ?? 0))
+        .toList();
+    verticals.sort((a, b) {
+      if (a.slug == _kRealEstateVertical) return -1;
+      if (b.slug == _kRealEstateVertical) return 1;
+      if (a.slug == _kVisaVertical) return -1;
+      if (b.slug == _kVisaVertical) return 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return verticals;
   }
 
   Future<List<TestCallCard>> _fetchCards(String verticalName) async {
@@ -176,14 +244,17 @@ class _AgentsScreenState extends State<AgentsScreen> {
   String? _resolveSelectedVertical(List<CampaignVertical> verticals) {
     if (verticals.isEmpty) return _kRealEstateVertical;
     final current = _selectedVerticalName;
-    if (current != null && _kAllowedVerticals.contains(current)) {
+    if (current != null && verticals.any((v) => v.slug == current)) {
       return current;
+    }
+    if (verticals.any((v) => v.slug == _kRealEstateVertical)) {
+      return _kRealEstateVertical;
     }
     return _kRealEstateVertical;
   }
 
   Future<void> _selectVertical(String verticalName) async {
-    if (!_kAllowedVerticals.contains(verticalName)) return;
+    if (!_verticals.any((v) => v.slug == verticalName)) return;
     if (_selectedVerticalName == verticalName) return;
     setState(() {
       _selectedVerticalName = verticalName;
@@ -252,10 +323,27 @@ class _AgentsScreenState extends State<AgentsScreen> {
   // ── Card create / edit / delete ──────────────────────────────────────────
 
   Future<void> _showCardDialog({TestCallCard? existing}) async {
+    if (!_canEdit) return;
     final isEdit = existing != null;
     var verticalName = isEdit
         ? _normalizeVerticalName(existing!.verticalName)
         : _kRealEstateVertical;
+    final activeVerticals = _verticals.isEmpty
+        ? [
+            CampaignVertical(
+              name: 'Real Estate',
+              slug: _kRealEstateVertical,
+              baseUrl: '',
+              adminKeyLast4: '',
+              isActive: true,
+              source: 'env',
+              cardCount: 0,
+            ),
+          ]
+        : _verticals;
+    if (!activeVerticals.any((v) => v.slug == verticalName)) {
+      verticalName = activeVerticals.first.slug;
+    }
     final cardCtl = TextEditingController(text: existing?.cardName ?? '');
     final agentCtl = TextEditingController(text: existing?.agentName ?? '');
 
@@ -328,6 +416,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
                     const SizedBox(height: 12),
                     _VerticalSelector(
                       value: verticalName,
+                      verticals: activeVerticals,
                       onChanged: (value) =>
                           setLocal(() => verticalName = value),
                     ),
@@ -374,7 +463,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
 
     try {
       if (isEdit) {
-        await _api.updateTestCallCard(existing.id, payload);
+        await _api.updateTestCallCard(existing!.id, payload);
         _toast('Card saved');
       } else {
         await _api.createTestCallCard(payload);
@@ -391,6 +480,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
   }
 
   Future<void> _renameCard(TestCallCard card) async {
+    if (!_canEdit) return;
     final ctl = TextEditingController(text: card.cardName);
     final formKey = GlobalKey<FormState>();
     final ok = await showDialog<bool>(
@@ -439,6 +529,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
   }
 
   Future<void> _deleteCard(TestCallCard card) async {
+    if (!_canEdit) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -463,6 +554,246 @@ class _AgentsScreenState extends State<AgentsScreen> {
       await _load();
     } catch (e) {
       _toast(_readableError(e, fallback: 'Failed to delete card'),
+          isError: true);
+    }
+  }
+
+  Future<void> _showVerticalManager() async {
+    final canEdit = _canEdit;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _kSurface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Text('Test Call Verticals',
+            style: TextStyle(
+                fontWeight: FontWeight.w600, color: _kText, fontSize: 18)),
+        content: SizedBox(
+          width: 720,
+          child: _verticals.isEmpty
+              ? const Text('No active verticals found.',
+                  style: TextStyle(color: _kMuted))
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final vertical in _verticals) ...[
+                      _VerticalManagementRow(
+                        vertical: vertical,
+                        canEdit: canEdit,
+                        onEdit: () {
+                          Navigator.of(ctx).pop();
+                          _showVerticalDialog(existing: vertical);
+                        },
+                        onDeactivate: () {
+                          Navigator.of(ctx).pop();
+                          _deactivateVertical(vertical);
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close', style: TextStyle(color: _kMuted)),
+          ),
+          if (canEdit)
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _kPrimary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
+              ),
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('New Vertical'),
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                _showVerticalDialog();
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showVerticalDialog({CampaignVertical? existing}) async {
+    if (!_canEdit) return;
+    final isEdit = existing != null;
+    if (isEdit && existing!.source == 'env') {
+      _toast('This vertical is configured in server env', isError: true);
+      return;
+    }
+
+    final nameCtl = TextEditingController(text: existing?.name ?? '');
+    final slugCtl = TextEditingController(text: existing?.slug ?? '');
+    final baseUrlCtl = TextEditingController(text: existing?.baseUrl ?? '');
+    final adminKeyCtl = TextEditingController();
+    bool isActive = existing?.isActive ?? true;
+    final formKey = GlobalKey<FormState>();
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          backgroundColor: _kSurface,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          title: Text(isEdit ? 'Edit Vertical' : 'New Vertical',
+              style: const TextStyle(
+                  fontWeight: FontWeight.w600, color: _kText, fontSize: 18)),
+          content: SizedBox(
+            width: 460,
+            child: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _Field(
+                    label: 'Name',
+                    controller: nameCtl,
+                    hint: 'e.g. Visa',
+                    validator: _required,
+                  ),
+                  const SizedBox(height: 12),
+                  _Field(
+                    label: 'Slug',
+                    controller: slugCtl,
+                    hint: 'e.g. visa',
+                    enabled: !isEdit,
+                    validator: (v) {
+                      final slug = _slugFromInput(v);
+                      if (slug.isEmpty) return 'Required';
+                      if (!RegExp(r'^[a-z0-9_]+$').hasMatch(slug)) {
+                        return 'Use lowercase letters, numbers, or underscore';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  _Field(
+                    label: 'Base URL',
+                    controller: baseUrlCtl,
+                    hint: 'https://api.example.com',
+                    validator: _required,
+                  ),
+                  const SizedBox(height: 12),
+                  _Field(
+                    label: isEdit ? 'New Admin Key (optional)' : 'Admin Key',
+                    controller: adminKeyCtl,
+                    hint: isEdit
+                        ? 'Leave blank to keep existing key'
+                        : 'secret-admin-key',
+                    obscure: true,
+                    validator: (v) => isEdit ? null : _required(v),
+                  ),
+                  const SizedBox(height: 8),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: isActive,
+                    activeColor: _kPrimary,
+                    onChanged: (value) =>
+                        setLocal(() => isActive = value ?? true),
+                    title: const Text('Active',
+                        style: TextStyle(color: _kText, fontSize: 13)),
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel', style: TextStyle(color: _kMuted)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _kPrimary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: () {
+                if (formKey.currentState?.validate() ?? false) {
+                  Navigator.of(ctx).pop(true);
+                }
+              },
+              child: Text(isEdit ? 'Save' : 'Create'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (saved != true) return;
+
+    final adminKey = adminKeyCtl.text.trim();
+    final payload = <String, dynamic>{
+      'name': nameCtl.text.trim(),
+      'base_url': baseUrlCtl.text.trim(),
+      'is_active': isActive,
+    };
+    if (!isEdit) {
+      payload['slug'] = _slugFromInput(slugCtl.text);
+      payload['admin_key'] = adminKey;
+    } else if (adminKey.isNotEmpty) {
+      payload['admin_key'] = adminKey;
+    }
+    adminKeyCtl.clear();
+
+    try {
+      if (isEdit) {
+        await _api.updateTestCallVertical(existing!.slug, payload);
+        _toast('Vertical saved');
+      } else {
+        await _api.createTestCallVertical(payload);
+        _toast('Vertical created');
+      }
+      await _load();
+    } catch (e) {
+      _toast(
+        _readableError(e,
+            fallback:
+                isEdit ? 'Failed to save vertical' : 'Failed to create vertical'),
+        isError: true,
+      );
+    }
+  }
+
+  Future<void> _deactivateVertical(CampaignVertical vertical) async {
+    if (!_canEdit) return;
+    if (vertical.source == 'env') {
+      _toast('This vertical is configured in server env', isError: true);
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Deactivate vertical?'),
+        content: Text('Deactivate "${_verticalLabel(vertical.slug)}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child:
+                const Text('Deactivate', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await _api.deactivateTestCallVertical(vertical.slug);
+      _toast('Vertical deactivated');
+      await _load();
+    } catch (e) {
+      _toast(_readableError(e, fallback: 'Failed to deactivate vertical'),
           isError: true);
     }
   }
@@ -680,6 +1011,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
   }
 
   Widget _buildHeader() {
+    final canEdit = _canEdit;
     return Row(
       children: [
         const Expanded(
@@ -703,6 +1035,20 @@ class _AgentsScreenState extends State<AgentsScreen> {
           icon: const Icon(Icons.refresh, color: _kMuted),
         ),
         const SizedBox(width: 4),
+        OutlinedButton.icon(
+          icon: const Icon(Icons.tune, size: 18),
+          label: Text(_isMobile ? 'Verticals' : 'Manage Verticals'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: _kPrimary,
+            side: const BorderSide(color: _kBorder),
+            padding: EdgeInsets.symmetric(
+                horizontal: _isMobile ? 12 : 16, vertical: 14),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+          onPressed: _showVerticalManager,
+        ),
+        const SizedBox(width: 8),
         ElevatedButton.icon(
           icon: const Icon(Icons.add, size: 18),
           label: Text(_isMobile ? 'New' : 'New Card'),
@@ -714,8 +1060,9 @@ class _AgentsScreenState extends State<AgentsScreen> {
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(8)),
           ),
-          onPressed:
-              _selectedVerticalName == null ? null : () => _showCardDialog(),
+          onPressed: canEdit && _selectedVerticalName != null
+              ? () => _showCardDialog()
+              : null,
         ),
       ],
     );
@@ -734,8 +1081,8 @@ class _AgentsScreenState extends State<AgentsScreen> {
               _VerticalOptionTile(
                 width: tileWidth,
                 vertical: vertical,
-                selected: vertical.name == _selectedVerticalName,
-                onTap: () => _selectVertical(vertical.name),
+                selected: vertical.slug == _selectedVerticalName,
+                onTap: () => _selectVertical(vertical.slug),
               ),
           ],
         );
@@ -809,6 +1156,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
       itemBuilder: (ctx, i) => _CardTile(
         card: _cards[i],
         onTap: () => _showCallPopup(_cards[i]),
+        canEdit: _canEdit,
         onRename: () => _renameCard(_cards[i]),
         onEdit: () => _showCardDialog(existing: _cards[i]),
         onDelete: () => _deleteCard(_cards[i]),
@@ -823,6 +1171,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
 
 class _CardTile extends StatelessWidget {
   final TestCallCard card;
+  final bool canEdit;
   final VoidCallback onTap;
   final VoidCallback onRename;
   final VoidCallback onEdit;
@@ -832,6 +1181,7 @@ class _CardTile extends StatelessWidget {
 
   const _CardTile({
     required this.card,
+    required this.canEdit,
     required this.onTap,
     required this.onRename,
     required this.onEdit,
@@ -862,9 +1212,9 @@ class _CardTile extends StatelessWidget {
                 children: [
                   Expanded(
                     child: GestureDetector(
-                      onTap: onRename,
+                      onTap: canEdit ? onRename : null,
                       child: Tooltip(
-                        message: 'Click to rename',
+                        message: canEdit ? 'Click to rename' : card.cardName,
                         child: Text(
                           card.cardName.isEmpty ? '(unnamed)' : card.cardName,
                           maxLines: 1,
@@ -879,21 +1229,22 @@ class _CardTile extends StatelessWidget {
                       ),
                     ),
                   ),
-                  PopupMenuButton<String>(
-                    padding: EdgeInsets.zero,
-                    icon: const Icon(Icons.more_vert,
-                        size: 18, color: _kMuted),
-                    onSelected: (v) {
-                      if (v == 'rename') onRename();
-                      if (v == 'edit') onEdit();
-                      if (v == 'delete') onDelete();
-                    },
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'rename', child: Text('Rename')),
-                      PopupMenuItem(value: 'edit', child: Text('Edit')),
-                      PopupMenuItem(value: 'delete', child: Text('Delete')),
-                    ],
-                  ),
+                  if (canEdit)
+                    PopupMenuButton<String>(
+                      padding: EdgeInsets.zero,
+                      icon: const Icon(Icons.more_vert,
+                          size: 18, color: _kMuted),
+                      onSelected: (v) {
+                        if (v == 'rename') onRename();
+                        if (v == 'edit') onEdit();
+                        if (v == 'delete') onDelete();
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'rename', child: Text('Rename')),
+                        PopupMenuItem(value: 'edit', child: Text('Edit')),
+                        PopupMenuItem(value: 'delete', child: Text('Delete')),
+                      ],
+                    ),
                 ],
               ),
               const SizedBox(height: 4),
@@ -1033,7 +1384,7 @@ class _VerticalOptionTile extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    _verticalLabel(vertical.name),
+                    _verticalLabel(vertical.slug),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -1056,6 +1407,118 @@ class _VerticalOptionTile extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VerticalManagementRow extends StatelessWidget {
+  final CampaignVertical vertical;
+  final bool canEdit;
+  final VoidCallback onEdit;
+  final VoidCallback onDeactivate;
+
+  const _VerticalManagementRow({
+    required this.vertical,
+    required this.canEdit,
+    required this.onEdit,
+    required this.onDeactivate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isEnv = vertical.source == 'env';
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _kBg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _kBorder),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        vertical.name.isEmpty
+                            ? _verticalLabel(vertical.slug)
+                            : vertical.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: _kText,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _SourceBadge(source: vertical.source),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${vertical.slug}  ·  ${vertical.cardCount} cards'
+                  '${vertical.adminKeyLast4.isNotEmpty ? '  ·  key ...${vertical.adminKeyLast4}' : ''}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _kMuted, fontSize: 12),
+                ),
+                if (isEnv)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 4),
+                    child: Text(
+                      'Configured in server env',
+                      style: TextStyle(color: _kMuted, fontSize: 11),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (canEdit && !isEnv) ...[
+            IconButton(
+              tooltip: 'Edit vertical',
+              onPressed: onEdit,
+              icon: const Icon(Icons.edit, size: 18, color: _kMuted),
+            ),
+            IconButton(
+              tooltip: 'Deactivate vertical',
+              onPressed: onDeactivate,
+              icon: const Icon(Icons.block, size: 18, color: Colors.red),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SourceBadge extends StatelessWidget {
+  final String source;
+
+  const _SourceBadge({required this.source});
+
+  @override
+  Widget build(BuildContext context) {
+    final isEnv = source == 'env';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: (isEnv ? _kPrimary : Colors.green).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        isEnv ? 'env' : 'database',
+        style: TextStyle(
+          color: isEnv ? _kPrimary : Colors.green[700],
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
         ),
       ),
     );
@@ -1100,22 +1563,37 @@ class _NumIconBtn extends StatelessWidget {
 String? _required(String? v) =>
     (v == null || v.trim().isEmpty) ? 'Required' : null;
 
+String _slugFromInput(String? name) {
+  final raw = (name ?? '').trim().toLowerCase();
+  return raw.replaceAll(RegExp(r'[^a-z0-9_]+'), '_');
+}
+
 String _normalizeVerticalName(String? name) {
-  return name == _kVisaVertical ? _kVisaVertical : _kRealEstateVertical;
+  final raw = (name ?? '').trim().toLowerCase();
+  if (raw.isEmpty) return _kRealEstateVertical;
+  if (raw == 'real_estate') return _kRealEstateVertical;
+  return _slugFromInput(raw);
 }
 
 String _verticalLabel(String name) {
   final normalized = _normalizeVerticalName(name);
   if (normalized == _kVisaVertical) return 'Visa';
-  return 'Real Estate';
+  if (normalized == _kRealEstateVertical) return 'Real Estate';
+  return normalized
+      .split('_')
+      .where((part) => part.isNotEmpty)
+      .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+      .join(' ');
 }
 
 class _VerticalSelector extends StatelessWidget {
   final String value;
+  final List<CampaignVertical> verticals;
   final ValueChanged<String> onChanged;
 
   const _VerticalSelector({
     required this.value,
+    required this.verticals,
     required this.onChanged,
   });
 
@@ -1133,35 +1611,33 @@ class _VerticalSelector extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 6),
-        SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(
-              value: _kRealEstateVertical,
-              label: Text('Real Estate'),
-            ),
-            ButtonSegment(
-              value: _kVisaVertical,
-              label: Text('Visa'),
-            ),
-          ],
-          selected: {value},
-          onSelectionChanged: (selected) => onChanged(selected.first),
-          style: ButtonStyle(
-            backgroundColor: WidgetStateProperty.resolveWith(
-              (states) => states.contains(WidgetState.selected)
-                  ? _kPrimary.withValues(alpha: 0.10)
-                  : _kSurface,
-            ),
-            foregroundColor: WidgetStateProperty.resolveWith(
-              (states) =>
-                  states.contains(WidgetState.selected) ? _kPrimary : _kText,
-            ),
-            side: WidgetStateProperty.resolveWith(
-              (states) => BorderSide(
-                color: states.contains(WidgetState.selected)
-                    ? _kPrimary
-                    : _kBorder,
+        DropdownButtonFormField<String>(
+          value: value,
+          items: [
+            for (final vertical in verticals)
+              DropdownMenuItem(
+                value: vertical.slug,
+                child: Text(_verticalLabel(vertical.slug)),
               ),
+          ],
+          onChanged: (value) {
+            if (value != null) onChanged(value);
+          },
+          decoration: InputDecoration(
+            isDense: true,
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: _kBorder),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: _kBorder),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: _kPrimary, width: 1.5),
             ),
           ),
         ),
@@ -1177,6 +1653,7 @@ class _Field extends StatelessWidget {
   final TextInputType? keyboardType;
   final String? Function(String?)? validator;
   final bool obscure;
+  final bool enabled;
   final String? prefixText;
   final List<TextInputFormatter>? inputFormatters;
 
@@ -1187,6 +1664,7 @@ class _Field extends StatelessWidget {
     this.keyboardType,
     this.validator,
     this.obscure = false,
+    this.enabled = true,
     this.prefixText,
     this.inputFormatters,
   });
@@ -1202,6 +1680,7 @@ class _Field extends StatelessWidget {
         const SizedBox(height: 6),
         TextFormField(
           controller: controller,
+          enabled: enabled,
           keyboardType: keyboardType,
           validator: validator,
           obscureText: obscure,
